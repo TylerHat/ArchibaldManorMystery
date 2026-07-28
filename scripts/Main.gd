@@ -253,7 +253,7 @@ func _build_wall_side(rname: String, center: Vector3, row: int, col: int, dir: S
 func _build_front_door(pos: Vector3) -> void:
 	var door := StaticBody3D.new()
 	door.name = "FrontDoor"
-	door.set_script(load("res://scripts/Door.gd"))
+	door.set_script(load("res://Scripts/Door.gd"))
 	rooms_node.add_child(door)
 	door.position = pos
 
@@ -284,7 +284,7 @@ func _spawn_npcs() -> void:
 		var center: Vector3 = room_centers.get(c["room"], Vector3.ZERO)
 		var npc := StaticBody3D.new()
 		npc.name = "NPC_" + c["id"]
-		npc.set_script(load("res://scripts/NPCCharacter.gd"))
+		npc.set_script(load("res://Scripts/NPCCharacter.gd"))
 		rooms_node.add_child(npc)
 		npc.character_id = c["id"]
 		npc.position = Vector3(center.x + randf_range(-2.5, 2.5), 0, center.z + randf_range(-2.5, 2.5))
@@ -325,7 +325,7 @@ func _spawn_player() -> void:
 	# below runs - otherwise they resolve to null.
 	player = CharacterBody3D.new()
 	player.name = "Player"
-	player.set_script(load("res://scripts/Player.gd"))
+	player.set_script(load("res://Scripts/Player.gd"))
 
 	var hall_center: Vector3 = room_centers.get("Hall", Vector3.ZERO)
 	player.position = Vector3(hall_center.x, 0.05, hall_center.z - 2.0)
