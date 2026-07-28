@@ -122,6 +122,11 @@ var murder_weapon: String = ""
 var murder_time: String = ""
 var transcript: Array = [] # [{character_id, question, answer}]
 
+# Which of the 8 CHARACTERS are actually in the mansion this game, chosen on
+# the pre-game selection screen. Defaults to all 8 if start_new_game() is
+# ever called without an explicit list (e.g. old save/dev code paths).
+var active_character_ids: Array = []
+
 var _histories: Dictionary = {} # character_id -> Array[{role, content}] (in-character roleplay memory)
 var _summaries: Dictionary = {} # character_id -> {timeline, motive, slipups} (empty {} = none yet / parse failed)
 var _summarized_at: Dictionary = {} # character_id -> transcript entry count included in that summary
@@ -166,12 +171,23 @@ func _add_key_action(action_name: String, keycode: int) -> void:
 		InputMap.action_add_event(action_name, ev)
 
 
-## Call this once when a fresh game (or a restart) begins. Picks a new random
-## murderer and resets every character's conversation memory.
-func start_new_game() -> void:
+## Call this once when a fresh game (or a restart) begins. `character_ids` is
+## the list of suspect ids chosen on the pre-game selection screen (2-8 of
+## them); if left empty, all 8 CHARACTERS are used. Picks a new random
+## murderer from among only the active suspects, and resets every active
+## character's conversation memory.
+func start_new_game(character_ids: Array = []) -> void:
 	randomize()
-	var idx := randi() % CHARACTERS.size()
-	murderer_id = CHARACTERS[idx]["id"]
+	if character_ids.is_empty():
+		active_character_ids = []
+		for c in CHARACTERS:
+			active_character_ids.append(c["id"])
+	else:
+		active_character_ids = character_ids.duplicate()
+
+	var pool := active_characters()
+	var idx := randi() % pool.size()
+	murderer_id = pool[idx]["id"]
 	murder_weapon = WEAPON_OPTIONS[randi() % WEAPON_OPTIONS.size()]
 	murder_time = TIME_OPTIONS[randi() % TIME_OPTIONS.size()]
 	transcript.clear()
@@ -181,7 +197,7 @@ func start_new_game() -> void:
 	_request_queue.clear()
 	_busy = false
 	_current_request = {}
-	for c in CHARACTERS:
+	for c in pool:
 		_histories[c["id"]] = [{"role": "system", "content": _build_system_prompt(c["id"])}]
 
 	var mc := get_character(murderer_id)
@@ -193,6 +209,16 @@ func get_character(id: String) -> Dictionary:
 		if c["id"] == id:
 			return c
 	return {}
+
+
+## The subset of CHARACTERS actually in the mansion this game, in the same
+## stable order as CHARACTERS (order doesn't depend on selection order).
+func active_characters() -> Array:
+	var out := []
+	for c in CHARACTERS:
+		if active_character_ids.has(c["id"]):
+			out.append(c)
+	return out
 
 
 func _build_system_prompt(id: String) -> String:

@@ -64,7 +64,9 @@ var dialogue_status_label: Label
 var current_dialogue_character: String = ""
 
 var accusation_panel: Panel
-var accusation_input: LineEdit
+var accusation_suspect_buttons: Dictionary = {} # character_id -> Button
+var accusation_selected_id: String = ""
+var accusation_accuse_button: Button
 var accusation_result_label: Label
 
 var notes_panel: Panel
@@ -81,15 +83,30 @@ var debug_label: Label
 
 var name_regexes: Dictionary = {} # character_id -> compiled RegEx matching that suspect's name variants
 
+var selection_layer: CanvasLayer
+var selection_checkboxes: Dictionary = {} # character_id -> CheckBox
+var selection_count_label: Label
+var selection_start_button: Button
+
 
 func _ready() -> void:
 	add_to_group("main_controller")
-	GameManager.start_new_game()
 	GameManager.ollama_response.connect(_on_ollama_response)
 	GameManager.ollama_error.connect(_on_ollama_error)
 	GameManager.summary_ready.connect(_on_summary_ready)
 	GameManager.summary_error.connect(_on_summary_error)
 
+	# The mouse may still be captured (MOUSE_MODE_CAPTURED) from a previous
+	# game if this is a "Play Again" scene reload - make sure it's free so
+	# the player can click checkboxes on the selection screen below.
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	_build_selection_screen()
+
+
+## Builds the whole game (mansion, suspects, player, UI) once the player has
+## picked which suspects are in tonight - called from _on_start_pressed().
+func _start_game(selected_ids: Array) -> void:
+	GameManager.start_new_game(selected_ids)
 	_build_name_regexes()
 	_build_world()
 	_build_mansion()
@@ -98,7 +115,168 @@ func _ready() -> void:
 	_build_ui()
 
 
+# --------------------------------------------------------- selection screen --
+# A pre-game screen letting the player choose 2-8 of the 8 suspects, either by
+# checking them individually or via a "Random N" quick-select row. The mansion
+# itself is always the same fixed 3x3 grid of 9 rooms; suspects who aren't
+# chosen simply don't get spawned into their room.
+
+func _build_selection_screen() -> void:
+	selection_layer = CanvasLayer.new()
+	add_child(selection_layer)
+
+	var bg := ColorRect.new()
+	bg.color = Color(0.05, 0.05, 0.08, 1.0)
+	bg.set_anchors_preset(Control.PRESET_FULL_RECT)
+	bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	selection_layer.add_child(bg)
+
+	var panel := Panel.new()
+	panel.set_anchors_preset(Control.PRESET_CENTER)
+	var panel_size := Vector2(640, 640)
+	panel.size = panel_size
+	panel.position = -panel_size / 2.0
+	selection_layer.add_child(panel)
+
+	var vbox := VBoxContainer.new()
+	vbox.set_anchors_preset(Control.PRESET_FULL_RECT)
+	vbox.offset_left = 20
+	vbox.offset_top = 20
+	vbox.offset_right = -20
+	vbox.offset_bottom = -20
+	vbox.add_theme_constant_override("separation", 10)
+	panel.add_child(vbox)
+
+	var title := Label.new()
+	title.text = "Archibald Manor: A Clue Mystery"
+	title.add_theme_font_size_override("font_size", 24)
+	vbox.add_child(title)
+
+	var subtitle := Label.new()
+	subtitle.text = "Choose which suspects are in the manor tonight (2 to %d)." % GameManager.CHARACTERS.size()
+	subtitle.autowrap_mode = TextServer.AUTOWRAP_WORD
+	vbox.add_child(subtitle)
+
+	var quick_label := Label.new()
+	quick_label.text = "Quick pick (random):"
+	quick_label.add_theme_font_size_override("font_size", 14)
+	quick_label.add_theme_color_override("font_color", Color(1, 1, 1, 0.75))
+	vbox.add_child(quick_label)
+
+	var quick_row := HBoxContainer.new()
+	quick_row.add_theme_constant_override("separation", 6)
+	vbox.add_child(quick_row)
+	for n in range(2, GameManager.CHARACTERS.size() + 1):
+		var qbtn := Button.new()
+		qbtn.text = str(n)
+		qbtn.custom_minimum_size = Vector2(38, 34)
+		qbtn.pressed.connect(_random_select.bind(n))
+		quick_row.add_child(qbtn)
+
+	var list_label := Label.new()
+	list_label.text = "Or pick specific suspects:"
+	list_label.add_theme_font_size_override("font_size", 14)
+	list_label.add_theme_color_override("font_color", Color(1, 1, 1, 0.75))
+	vbox.add_child(list_label)
+
+	var scroll := ScrollContainer.new()
+	scroll.custom_minimum_size = Vector2(0, 260)
+	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	vbox.add_child(scroll)
+
+	var list_vbox := VBoxContainer.new()
+	list_vbox.add_theme_constant_override("separation", 4)
+	list_vbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	scroll.add_child(list_vbox)
+
+	selection_checkboxes.clear()
+	for c in GameManager.CHARACTERS:
+		var id: String = c["id"]
+		var cb := CheckBox.new()
+		cb.text = "%s - %s" % [String(c["name"]), String(c["job"])]
+		cb.button_pressed = true
+		cb.add_theme_color_override("font_color", NPC_COLORS.get(id, Color.WHITE))
+		cb.add_theme_color_override("font_hover_color", NPC_COLORS.get(id, Color.WHITE))
+		cb.toggled.connect(func(_pressed): _update_selection_count())
+		list_vbox.add_child(cb)
+		selection_checkboxes[id] = cb
+
+	selection_count_label = Label.new()
+	vbox.add_child(selection_count_label)
+
+	var button_row := HBoxContainer.new()
+	button_row.add_theme_constant_override("separation", 10)
+	vbox.add_child(button_row)
+
+	var all_btn := Button.new()
+	all_btn.text = "Select All"
+	all_btn.pressed.connect(func(): _set_all_checkboxes(true))
+	button_row.add_child(all_btn)
+
+	var none_btn := Button.new()
+	none_btn.text = "Clear"
+	none_btn.pressed.connect(func(): _set_all_checkboxes(false))
+	button_row.add_child(none_btn)
+
+	selection_start_button = Button.new()
+	selection_start_button.text = "Start Game"
+	selection_start_button.pressed.connect(_on_start_pressed)
+	button_row.add_child(selection_start_button)
+
+	_update_selection_count()
+
+
+func _random_select(n: int) -> void:
+	var ids := []
+	for c in GameManager.CHARACTERS:
+		ids.append(c["id"])
+	ids.shuffle()
+	var chosen := {}
+	for i in range(min(n, ids.size())):
+		chosen[ids[i]] = true
+	for id in selection_checkboxes.keys():
+		selection_checkboxes[id].set_pressed_no_signal(chosen.has(id))
+	_update_selection_count()
+
+
+func _set_all_checkboxes(pressed: bool) -> void:
+	for id in selection_checkboxes.keys():
+		selection_checkboxes[id].set_pressed_no_signal(pressed)
+	_update_selection_count()
+
+
+func _update_selection_count() -> void:
+	var count := 0
+	for id in selection_checkboxes.keys():
+		if selection_checkboxes[id].button_pressed:
+			count += 1
+	var max_count: int = GameManager.CHARACTERS.size()
+	selection_count_label.text = "%d selected" % count
+	if count < 2 or count > max_count:
+		selection_count_label.add_theme_color_override("font_color", Color(1, 0.45, 0.45))
+		selection_start_button.disabled = true
+	else:
+		selection_count_label.add_theme_color_override("font_color", Color(0.55, 1, 0.55))
+		selection_start_button.disabled = false
+
+
+func _on_start_pressed() -> void:
+	var selected_ids := []
+	for c in GameManager.CHARACTERS: # keep CHARACTERS' stable order regardless of click order
+		var id: String = c["id"]
+		if selection_checkboxes[id].button_pressed:
+			selected_ids.append(id)
+	if selected_ids.size() < 2:
+		return
+
+	selection_layer.queue_free()
+	selection_layer = null
+	_start_game(selected_ids)
+
+
 func _unhandled_input(event: InputEvent) -> void:
+	if selection_layer != null:
+		return # still on the pre-game suspect-selection screen; nothing to handle yet
 	if event.is_action_pressed("ui_cancel"):
 		if dialogue_panel and dialogue_panel.visible:
 			close_dialogue()
@@ -280,7 +458,7 @@ func _build_front_door(pos: Vector3) -> void:
 # -------------------------------------------------------------- characters --
 
 func _spawn_npcs() -> void:
-	for c in GameManager.CHARACTERS:
+	for c in GameManager.active_characters():
 		var center: Vector3 = room_centers.get(c["room"], Vector3.ZERO)
 		var npc := StaticBody3D.new()
 		npc.name = "NPC_" + c["id"]
@@ -461,8 +639,8 @@ func _build_dialogue_panel() -> void:
 func _build_accusation_panel() -> void:
 	accusation_panel = Panel.new()
 	accusation_panel.set_anchors_preset(Control.PRESET_CENTER)
-	accusation_panel.size = Vector2(480, 260)
-	accusation_panel.position = Vector2(-240, -130)
+	accusation_panel.size = Vector2(480, 480)
+	accusation_panel.position = Vector2(-240, -240)
 	accusation_panel.visible = false
 	ui_layer.add_child(accusation_panel)
 
@@ -481,22 +659,47 @@ func _build_accusation_panel() -> void:
 	vbox.add_child(title)
 
 	var subtitle := Label.new()
-	subtitle.text = "Type a suspect's name and make your final accusation."
+	subtitle.text = "Select a suspect below and make your final accusation."
 	subtitle.autowrap_mode = TextServer.AUTOWRAP_WORD
 	vbox.add_child(subtitle)
 
-	accusation_input = LineEdit.new()
-	accusation_input.placeholder_text = "e.g. Marcus Sterling"
-	accusation_input.text_submitted.connect(func(_t): _submit_accusation())
-	vbox.add_child(accusation_input)
+	# One button per suspect actually in this game (matches the Case Notes
+	# tabs), colored to match their body color in the mansion. Clicking one
+	# selects it (highlighted, like the notes tabs) rather than typing a name.
+	var scroll := ScrollContainer.new()
+	scroll.custom_minimum_size = Vector2(0, 240)
+	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	vbox.add_child(scroll)
+
+	var list_vbox := VBoxContainer.new()
+	list_vbox.add_theme_constant_override("separation", 4)
+	list_vbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	scroll.add_child(list_vbox)
+
+	accusation_suspect_buttons.clear()
+	for c in GameManager.active_characters():
+		var id: String = c["id"]
+		var color: Color = NPC_COLORS.get(id, Color.WHITE)
+		var btn := Button.new()
+		btn.text = String(c["name"])
+		btn.custom_minimum_size = Vector2(0, 36)
+		btn.alignment = HORIZONTAL_ALIGNMENT_LEFT
+		btn.add_theme_font_size_override("font_size", 16)
+		btn.add_theme_color_override("font_color", color)
+		btn.add_theme_color_override("font_hover_color", color)
+		btn.add_theme_color_override("font_pressed_color", color)
+		btn.pressed.connect(_select_accusation_suspect.bind(id))
+		list_vbox.add_child(btn)
+		accusation_suspect_buttons[id] = btn
 
 	var hbox := HBoxContainer.new()
 	vbox.add_child(hbox)
 
-	var accuse_btn := Button.new()
-	accuse_btn.text = "Accuse"
-	accuse_btn.pressed.connect(_submit_accusation)
-	hbox.add_child(accuse_btn)
+	accusation_accuse_button = Button.new()
+	accusation_accuse_button.text = "Accuse"
+	accusation_accuse_button.disabled = true
+	accusation_accuse_button.pressed.connect(_submit_accusation)
+	hbox.add_child(accusation_accuse_button)
 
 	var cancel_btn := Button.new()
 	cancel_btn.text = "Cancel (Esc)"
@@ -507,6 +710,21 @@ func _build_accusation_panel() -> void:
 	accusation_result_label.add_theme_color_override("font_color", Color(1, 0.5, 0.5))
 	accusation_result_label.autowrap_mode = TextServer.AUTOWRAP_WORD
 	vbox.add_child(accusation_result_label)
+
+
+## Highlights the clicked suspect button (matching the Case Notes tab style)
+## and enables the Accuse button once something is selected.
+func _select_accusation_suspect(id: String) -> void:
+	accusation_selected_id = id
+	accusation_accuse_button.disabled = false
+	for bid in accusation_suspect_buttons.keys():
+		var btn: Button = accusation_suspect_buttons[bid]
+		if bid == id:
+			btn.add_theme_stylebox_override("normal", _selected_tab_stylebox())
+			btn.add_theme_stylebox_override("hover", _selected_tab_stylebox())
+		else:
+			btn.remove_theme_stylebox_override("normal")
+			btn.remove_theme_stylebox_override("hover")
 
 
 func _build_notes_panel() -> void:
@@ -552,7 +770,7 @@ func _build_notes_panel() -> void:
 
 	notes_tab_buttons.clear()
 	notes_flag_dots.clear()
-	for c in GameManager.CHARACTERS:
+	for c in GameManager.active_characters():
 		var id: String = c["id"]
 		var color: Color = NPC_COLORS.get(id, Color.WHITE)
 
@@ -700,7 +918,7 @@ func _build_name_regexes() -> void:
 	var variant_owner: Dictionary = {} # lowercase variant -> character_id, or "AMBIGUOUS"
 	var variants_by_char: Dictionary = {} # character_id -> Array[String]
 
-	for c in GameManager.CHARACTERS:
+	for c in GameManager.active_characters():
 		var id: String = c["id"]
 		var variants: Array = _name_variants(c)
 		variants_by_char[id] = variants
@@ -712,7 +930,7 @@ func _build_name_regexes() -> void:
 				variant_owner[key] = id
 
 	name_regexes.clear()
-	for c in GameManager.CHARACTERS:
+	for c in GameManager.active_characters():
 		var id: String = c["id"]
 		var valid_variants: Array = []
 		for v in variants_by_char[id]:
@@ -856,10 +1074,14 @@ func _on_ollama_error(character_id: String, message: String) -> void:
 func open_accusation() -> void:
 	close_dialogue()
 	accusation_result_label.text = ""
-	accusation_input.text = ""
+	accusation_selected_id = ""
+	accusation_accuse_button.disabled = true
+	for bid in accusation_suspect_buttons.keys():
+		var btn: Button = accusation_suspect_buttons[bid]
+		btn.remove_theme_stylebox_override("normal")
+		btn.remove_theme_stylebox_override("hover")
 	accusation_panel.visible = true
 	player.set_mouse_captured(false)
-	accusation_input.grab_focus()
 
 
 func close_accusation() -> void:
@@ -868,17 +1090,17 @@ func close_accusation() -> void:
 
 
 func _submit_accusation() -> void:
-	var guess := accusation_input.text.strip_edges()
-	if guess == "":
+	if accusation_selected_id == "":
 		return
-	if GameManager.check_accusation(guess):
+	if GameManager.check_accusation(accusation_selected_id):
 		accusation_panel.visible = false
 		var c := GameManager.get_character(GameManager.murderer_id)
 		win_label.text = "Case closed! %s was the murderer.\n\nMotive: %s" % [String(c.get("name", "")), String(c.get("flavor", ""))]
 		win_panel.visible = true
 		player.set_mouse_captured(false)
 	else:
-		accusation_result_label.text = "That's not who the evidence points to. Keep investigating..."
+		var c := GameManager.get_character(accusation_selected_id)
+		accusation_result_label.text = "%s isn't who the evidence points to. Keep investigating..." % String(c.get("short", "That suspect"))
 
 
 func toggle_notes() -> void:
@@ -898,7 +1120,7 @@ func toggle_notes() -> void:
 
 
 func _first_interviewed_character() -> String:
-	for c in GameManager.CHARACTERS:
+	for c in GameManager.active_characters():
 		if not GameManager.get_transcript_for(c["id"]).is_empty():
 			return c["id"]
 	return ""

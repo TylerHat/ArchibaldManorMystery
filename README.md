@@ -2,11 +2,14 @@
 
 A 3D first-person murder-mystery game built in Godot 4.7. You're the
 detective. Lord Reginald Archibald has been murdered in his own manor, and
-one of his 8 guests did it. Question them, catch them in a lie, and make
-your accusation at the front door.
+one of his guests did it. Question them, catch them in a lie, and make your
+accusation at the front door.
 
-The murderer is picked at random every time you launch the game (or hit
-"Play Again"), so it could be Marcus one game and Victoria the next.
+Every time you launch the game (or hit "Play Again"), you first pick which
+2 to 8 of the 8 suspects are actually in the manor that night - either with
+quick "Random N" buttons or by checking specific suspects yourself. The
+murderer is then picked at random from among just that group, so it could
+be Marcus one game and Victoria the next.
 
 ## Requirements
 
@@ -25,10 +28,10 @@ The murderer is picked at random every time you launch the game (or hit
 ## How to run it
 
 Open Godot 4.7, choose "Import", and select the `project.godot` file in
-this folder. Press Play (F5). The main scene is `Main.tscn`, which builds
-the entire mansion and UI in code on startup (there's nothing else to wire
-up). The window opens maximized and the 3D view/UI stretch to fill
-whatever size you resize it to (no black bars).
+this folder. Press Play (F5). The main scene is `Main.tscn`, which first
+shows a suspect-selection screen, then builds the mansion and UI in code
+(there's nothing else to wire up). The window opens maximized and the 3D
+view/UI stretch to fill whatever size you resize it to (no black bars).
 
 ## Controls
 
@@ -79,8 +82,11 @@ whatever size you resize it to (no black bars).
   Lounge, Study, Dining Room, Billiard Room, Library, and the Hall), all
   connected by open doorways. All of it is built procedurally out of simple
   boxes and capsules in `scripts/Main.gd` - no external 3D models required.
-- Each of the 8 suspects stands in their own room. Walk up and interact to
-  open a text chat with them.
+  The grid itself never changes size; if you leave a suspect out at the
+  selection screen, their room is just left empty.
+- Each suspect you selected stands in their own room. Walk up and interact
+  to open a text chat with them. Case notes tabs, the debug overlay, and the
+  murderer pool are all limited to the suspects you picked that game.
 - Every question you type is sent to a local `llama3.2:3b` model via
   Ollama, along with that character's personality, job, and a system prompt
   describing the case. Each character remembers your prior conversation
