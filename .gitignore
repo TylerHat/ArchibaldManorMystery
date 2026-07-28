@@ -1,0 +1,14 @@
+# Godot 4+ generated/cache files - safe to ignore, Godot rebuilds these automatically
+.godot/
+.import/
+export.cfg
+export_presets.cfg
+
+# Common OS/editor cruft
+.DS_Store
+Thumbs.db
+*.tmp
+
+# Godot exported builds (if you ever export to a folder inside the project)
+/builds/
+/export/

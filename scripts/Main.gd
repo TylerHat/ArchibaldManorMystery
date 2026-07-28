@@ -1,0 +1,1044 @@
+extends Node3D
+# Builds the entire mansion, the player, all 8 suspects, and all UI purely in
+# code (no hand-authored sub-scenes), so the whole game lives in a handful of
+# readable script files. Also acts as the central "controller" that NPCs and
+# the front door call into (via the "main_controller" group) to open dialogue
+# / accusation panels.
+
+const CELL := 12.0
+const PITCH := 13.0
+const WALL_H := 3.0
+const WALL_T := 0.4
+const DOOR_W := 3.0
+
+# 3x3 layout. Hall (front door + player spawn) sits at the front-center so
+# the front door can face the exterior.
+const GRID := [
+	["Kitchen", "Ballroom", "Conservatory"],
+	["Lounge", "Study", "Dining Room"],
+	["Billiard Room", "Hall", "Library"],
+]
+
+const ROOM_COLORS := {
+	"Kitchen": Color(0.85, 0.8, 0.6),
+	"Ballroom": Color(0.75, 0.65, 0.85),
+	"Conservatory": Color(0.65, 0.85, 0.7),
+	"Lounge": Color(0.8, 0.6, 0.55),
+	"Study": Color(0.6, 0.55, 0.75),
+	"Dining Room": Color(0.85, 0.7, 0.5),
+	"Billiard Room": Color(0.4, 0.5, 0.45),
+	"Library": Color(0.55, 0.45, 0.35),
+	"Hall": Color(0.75, 0.72, 0.65),
+}
+const WALL_COLOR := Color(0.92, 0.9, 0.85)
+
+# These double as both the suspect's 3D capsule color AND their name color
+# in the Case Notes UI, so every entry needs to stay legible as text on a
+# dark panel background - avoid very dark/near-black shades here.
+const NPC_COLORS := {
+	"blackwood": Color(0.2, 0.5, 0.8),
+	"sterling": Color(0.8, 0.2, 0.2),
+	"ashford": Color(0.7, 0.2, 0.6),
+	"carter": Color(0.6, 0.6, 0.65),
+	"whitmore": Color(0.9, 0.7, 0.2),
+	"reeves": Color(0.4, 0.6, 0.3),
+	"cross_natalie": Color(0.8, 0.4, 0.1),
+	"cross_eugene": Color(0.6, 0.5, 0.4),
+}
+
+var rooms_node: Node3D
+var room_centers: Dictionary = {}
+var player: CharacterBody3D
+var front_door_node = null
+
+var ui_layer: CanvasLayer
+var crosshair: ColorRect
+var prompt_label: Label
+
+var dialogue_panel: Panel
+var dialogue_name_label: Label
+var dialogue_log: RichTextLabel
+var dialogue_input: LineEdit
+var dialogue_ask_button: Button
+var dialogue_status_label: Label
+var current_dialogue_character: String = ""
+
+var accusation_panel: Panel
+var accusation_input: LineEdit
+var accusation_result_label: Label
+
+var notes_panel: Panel
+var notes_log: RichTextLabel
+var notes_tab_buttons: Dictionary = {} # character_id -> Button
+var notes_flag_dots: Dictionary = {} # character_id -> ColorRect (shown when Slipups has real content)
+var notes_selected_char: String = ""
+var _pending_summaries: Dictionary = {} # character_id -> true while a summary request is in flight
+
+var win_panel: Panel
+var win_label: Label
+
+var debug_label: Label
+
+var name_regexes: Dictionary = {} # character_id -> compiled RegEx matching that suspect's name variants
+
+
+func _ready() -> void:
+	add_to_group("main_controller")
+	GameManager.start_new_game()
+	GameManager.ollama_response.connect(_on_ollama_response)
+	GameManager.ollama_error.connect(_on_ollama_error)
+	GameManager.summary_ready.connect(_on_summary_ready)
+	GameManager.summary_error.connect(_on_summary_error)
+
+	_build_name_regexes()
+	_build_world()
+	_build_mansion()
+	_spawn_npcs()
+	_spawn_player()
+	_build_ui()
+
+
+func _unhandled_input(event: InputEvent) -> void:
+	if event.is_action_pressed("ui_cancel"):
+		if dialogue_panel and dialogue_panel.visible:
+			close_dialogue()
+			get_viewport().set_input_as_handled()
+		elif accusation_panel and accusation_panel.visible:
+			close_accusation()
+			get_viewport().set_input_as_handled()
+		elif notes_panel and notes_panel.visible:
+			toggle_notes()
+			get_viewport().set_input_as_handled()
+	elif event.is_action_pressed("toggle_notes"):
+		if not (dialogue_panel.visible or accusation_panel.visible):
+			toggle_notes()
+	elif event.is_action_pressed("toggle_debug"):
+		toggle_debug()
+
+
+# ---------------------------------------------------------------- geometry --
+
+func add_solid_box(parent: Node3D, box_name: String, size: Vector3, pos: Vector3, color: Color) -> StaticBody3D:
+	var body := StaticBody3D.new()
+	body.name = box_name
+	parent.add_child(body)
+	body.position = pos
+
+	var mesh_instance := MeshInstance3D.new()
+	var box_mesh := BoxMesh.new()
+	box_mesh.size = size
+	mesh_instance.mesh = box_mesh
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = color
+	mesh_instance.material_override = mat
+	body.add_child(mesh_instance)
+
+	var coll := CollisionShape3D.new()
+	var shape := BoxShape3D.new()
+	shape.size = size
+	coll.shape = shape
+	body.add_child(coll)
+
+	return body
+
+
+func _build_world() -> void:
+	var env := WorldEnvironment.new()
+	var e := Environment.new()
+	e.background_mode = Environment.BG_COLOR
+	e.background_color = Color(0.05, 0.05, 0.08)
+	e.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
+	e.ambient_light_color = Color(0.55, 0.53, 0.58)
+	e.ambient_light_energy = 0.7
+	env.environment = e
+	add_child(env)
+
+	var light := DirectionalLight3D.new()
+	light.rotation_degrees = Vector3(-55, -30, 0)
+	light.light_energy = 1.1
+	light.shadow_enabled = true
+	add_child(light)
+
+	rooms_node = Node3D.new()
+	rooms_node.name = "Rooms"
+	add_child(rooms_node)
+
+	# A large safety-net ground plane beneath everything.
+	add_solid_box(rooms_node, "Ground", Vector3(60, 0.2, 60), Vector3(0, -0.6, 0), Color(0.1, 0.1, 0.12))
+
+
+func _room_center(row: int, col: int) -> Vector3:
+	return Vector3((col - 1) * PITCH, 0, (row - 1) * PITCH)
+
+
+func _has_neighbor(row: int, col: int, dir: String) -> bool:
+	match dir:
+		"north":
+			return row - 1 >= 0
+		"south":
+			return row + 1 <= 2
+		"west":
+			return col - 1 >= 0
+		_:
+			return col + 1 <= 2
+
+
+func _build_mansion() -> void:
+	for row in range(GRID.size()):
+		for col in range(GRID[row].size()):
+			var rname: String = GRID[row][col]
+			var center := _room_center(row, col)
+			room_centers[rname] = center
+			_build_room(rname, center, row, col)
+
+
+func _build_room(rname: String, center: Vector3, row: int, col: int) -> void:
+	var color: Color = ROOM_COLORS.get(rname, Color(0.8, 0.75, 0.65))
+	# Floor tiles are sized to PITCH (room spacing), not CELL (room interior
+	# width), so neighboring floors butt up exactly against each other with
+	# no strip of missing floor under the doorway gaps in the walls.
+	add_solid_box(rooms_node, rname + "_Floor", Vector3(PITCH, 0.2, PITCH), Vector3(center.x, -0.1, center.z), color)
+
+	# Each shared boundary between two rooms must only be built ONCE, by
+	# whichever room "owns" it - otherwise two offset wall segments end up
+	# facing each other with a sliver of a gap between them that's narrower
+	# than the player and easy to get wedged in. South and east walls are
+	# always built by this room (covering both interior boundaries and the
+	# south/east edges of the mansion). North and west walls are only built
+	# here when there's no neighbor on that side (i.e. they're the outer
+	# edge of the mansion) - otherwise the neighboring room's south/east
+	# call already covers that same boundary.
+	_build_wall_side(rname, center, row, col, "south")
+	_build_wall_side(rname, center, row, col, "east")
+	if not _has_neighbor(row, col, "north"):
+		_build_wall_side(rname, center, row, col, "north")
+	if not _has_neighbor(row, col, "west"):
+		_build_wall_side(rname, center, row, col, "west")
+
+	var label := Label3D.new()
+	label.text = rname
+	label.position = Vector3(center.x, 3.4, center.z)
+	label.font_size = 56
+	label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+	rooms_node.add_child(label)
+
+
+func _build_wall_side(rname: String, center: Vector3, row: int, col: int, dir: String) -> void:
+	var half := CELL / 2.0
+	if dir == "north" or dir == "south":
+		var has_n := _has_neighbor(row, col, dir)
+		var z: float = center.z + (-half if dir == "north" else half)
+		var is_front_door := rname == "Hall" and dir == "south" and not has_n
+		if has_n or is_front_door:
+			var seg := (CELL - DOOR_W) / 2.0
+			var off := DOOR_W / 2.0 + seg / 2.0
+			add_solid_box(rooms_node, rname + "_" + dir + "_a", Vector3(seg, WALL_H, WALL_T), Vector3(center.x - off, WALL_H / 2.0, z), WALL_COLOR)
+			add_solid_box(rooms_node, rname + "_" + dir + "_b", Vector3(seg, WALL_H, WALL_T), Vector3(center.x + off, WALL_H / 2.0, z), WALL_COLOR)
+			if is_front_door:
+				_build_front_door(Vector3(center.x, 0, z))
+		else:
+			add_solid_box(rooms_node, rname + "_" + dir, Vector3(CELL, WALL_H, WALL_T), Vector3(center.x, WALL_H / 2.0, z), WALL_COLOR)
+	else:
+		var has_n2 := _has_neighbor(row, col, dir)
+		var x: float = center.x + (-half if dir == "west" else half)
+		if has_n2:
+			var seg2 := (CELL - DOOR_W) / 2.0
+			var off2 := DOOR_W / 2.0 + seg2 / 2.0
+			add_solid_box(rooms_node, rname + "_" + dir + "_a", Vector3(WALL_T, WALL_H, seg2), Vector3(x, WALL_H / 2.0, center.z - off2), WALL_COLOR)
+			add_solid_box(rooms_node, rname + "_" + dir + "_b", Vector3(WALL_T, WALL_H, seg2), Vector3(x, WALL_H / 2.0, center.z + off2), WALL_COLOR)
+		else:
+			add_solid_box(rooms_node, rname + "_" + dir, Vector3(WALL_T, WALL_H, CELL), Vector3(x, WALL_H / 2.0, center.z), WALL_COLOR)
+
+
+func _build_front_door(pos: Vector3) -> void:
+	var door := StaticBody3D.new()
+	door.name = "FrontDoor"
+	door.set_script(load("res://scripts/Door.gd"))
+	rooms_node.add_child(door)
+	door.position = pos
+
+	var mesh := MeshInstance3D.new()
+	var box := BoxMesh.new()
+	box.size = Vector3(DOOR_W - 0.6, WALL_H - 0.3, 0.2)
+	mesh.mesh = box
+	mesh.position.y = box.size.y / 2.0
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = Color(0.36, 0.2, 0.1)
+	mesh.material_override = mat
+	door.add_child(mesh)
+
+	var coll := CollisionShape3D.new()
+	var shape := BoxShape3D.new()
+	shape.size = box.size
+	coll.shape = shape
+	coll.position.y = mesh.position.y
+	door.add_child(coll)
+
+	front_door_node = door
+
+
+# -------------------------------------------------------------- characters --
+
+func _spawn_npcs() -> void:
+	for c in GameManager.CHARACTERS:
+		var center: Vector3 = room_centers.get(c["room"], Vector3.ZERO)
+		var npc := StaticBody3D.new()
+		npc.name = "NPC_" + c["id"]
+		npc.set_script(load("res://scripts/NPCCharacter.gd"))
+		rooms_node.add_child(npc)
+		npc.character_id = c["id"]
+		npc.position = Vector3(center.x + randf_range(-2.5, 2.5), 0, center.z + randf_range(-2.5, 2.5))
+
+		var mesh := MeshInstance3D.new()
+		var cap := CapsuleMesh.new()
+		cap.height = 1.8
+		cap.radius = 0.4
+		mesh.mesh = cap
+		mesh.position.y = 0.9
+		var mat := StandardMaterial3D.new()
+		mat.albedo_color = NPC_COLORS.get(c["id"], Color.WHITE)
+		mesh.material_override = mat
+		npc.add_child(mesh)
+
+		var coll := CollisionShape3D.new()
+		var cshape := CapsuleShape3D.new()
+		cshape.height = 1.8
+		cshape.radius = 0.4
+		coll.shape = cshape
+		coll.position.y = 0.9
+		npc.add_child(coll)
+
+		var label := Label3D.new()
+		label.text = c["name"]
+		label.position.y = 2.15
+		label.font_size = 36
+		label.outline_size = 10
+		label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+		npc.add_child(label)
+
+
+func _spawn_player() -> void:
+	# Build the whole node hierarchy (collision shape, camera, interact ray)
+	# BEFORE the player enters the scene tree. Player.gd resolves $Camera3D
+	# and $Camera3D/InteractRay via @onready as soon as it enters the tree,
+	# so those children must already exist by the time add_child(player)
+	# below runs - otherwise they resolve to null.
+	player = CharacterBody3D.new()
+	player.name = "Player"
+	player.set_script(load("res://scripts/Player.gd"))
+
+	var hall_center: Vector3 = room_centers.get("Hall", Vector3.ZERO)
+	player.position = Vector3(hall_center.x, 0.05, hall_center.z - 2.0)
+
+	var coll := CollisionShape3D.new()
+	var cshape := CapsuleShape3D.new()
+	cshape.height = 1.8
+	cshape.radius = 0.4
+	coll.shape = cshape
+	coll.position.y = 0.9
+	player.add_child(coll)
+
+	var cam := Camera3D.new()
+	cam.name = "Camera3D"
+	cam.position.y = 1.6
+	cam.current = true
+	player.add_child(cam)
+
+	var ray := RayCast3D.new()
+	ray.name = "InteractRay"
+	ray.target_position = Vector3(0, 0, -3.5)
+	ray.enabled = true
+	cam.add_child(ray)
+
+	add_child(player)
+
+
+# --------------------------------------------------------------------- UI --
+
+func _build_ui() -> void:
+	ui_layer = CanvasLayer.new()
+	add_child(ui_layer)
+
+	crosshair = ColorRect.new()
+	crosshair.color = Color(1, 1, 1, 0.85)
+	crosshair.size = Vector2(4, 4)
+	crosshair.set_anchors_preset(Control.PRESET_CENTER)
+	crosshair.position = Vector2(-2, -2)
+	crosshair.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	ui_layer.add_child(crosshair)
+
+	prompt_label = Label.new()
+	prompt_label.set_anchors_preset(Control.PRESET_CENTER_BOTTOM)
+	prompt_label.position = Vector2(-220, -80)
+	prompt_label.size = Vector2(440, 30)
+	prompt_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	prompt_label.add_theme_color_override("font_color", Color(1, 1, 1))
+	prompt_label.add_theme_font_size_override("font_size", 20)
+	prompt_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	prompt_label.visible = false
+	ui_layer.add_child(prompt_label)
+
+	var help := Label.new()
+	help.text = "WASD move | Space jump | Mouse look | Click or E to interact | Tab case notes | F1 debug | Esc release mouse"
+	help.set_anchors_preset(Control.PRESET_TOP_LEFT)
+	help.position = Vector2(16, 16)
+	help.add_theme_font_size_override("font_size", 14)
+	help.add_theme_color_override("font_color", Color(1, 1, 1, 0.85))
+	help.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	ui_layer.add_child(help)
+
+	debug_label = Label.new()
+	debug_label.set_anchors_preset(Control.PRESET_TOP_RIGHT)
+	debug_label.position = Vector2(-360, 16)
+	debug_label.size = Vector2(344, 80)
+	debug_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	debug_label.autowrap_mode = TextServer.AUTOWRAP_WORD
+	debug_label.add_theme_font_size_override("font_size", 14)
+	debug_label.add_theme_color_override("font_color", Color(1, 0.4, 0.4))
+	debug_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	debug_label.visible = false
+	_refresh_debug_label()
+	ui_layer.add_child(debug_label)
+
+	_build_dialogue_panel()
+	_build_accusation_panel()
+	_build_notes_panel()
+	_build_win_panel()
+
+
+func _build_dialogue_panel() -> void:
+	dialogue_panel = Panel.new()
+	dialogue_panel.set_anchors_preset(Control.PRESET_CENTER)
+	dialogue_panel.size = Vector2(560, 420)
+	dialogue_panel.position = Vector2(-280, -210)
+	dialogue_panel.visible = false
+	ui_layer.add_child(dialogue_panel)
+
+	var vbox := VBoxContainer.new()
+	vbox.set_anchors_preset(Control.PRESET_FULL_RECT)
+	vbox.offset_left = 16
+	vbox.offset_top = 16
+	vbox.offset_right = -16
+	vbox.offset_bottom = -16
+	vbox.add_theme_constant_override("separation", 8)
+	dialogue_panel.add_child(vbox)
+
+	dialogue_name_label = Label.new()
+	dialogue_name_label.add_theme_font_size_override("font_size", 22)
+	vbox.add_child(dialogue_name_label)
+
+	dialogue_log = RichTextLabel.new()
+	dialogue_log.custom_minimum_size = Vector2(0, 260)
+	dialogue_log.bbcode_enabled = true
+	dialogue_log.scroll_following = true
+	vbox.add_child(dialogue_log)
+
+	dialogue_status_label = Label.new()
+	dialogue_status_label.text = ""
+	dialogue_status_label.add_theme_color_override("font_color", Color(1, 0.8, 0.3))
+	vbox.add_child(dialogue_status_label)
+
+	var hbox := HBoxContainer.new()
+	vbox.add_child(hbox)
+
+	dialogue_input = LineEdit.new()
+	dialogue_input.placeholder_text = "Type your question..."
+	dialogue_input.custom_minimum_size = Vector2(420, 0)
+	dialogue_input.text_submitted.connect(func(_t): _send_question())
+	hbox.add_child(dialogue_input)
+
+	dialogue_ask_button = Button.new()
+	dialogue_ask_button.text = "Ask"
+	dialogue_ask_button.pressed.connect(_send_question)
+	hbox.add_child(dialogue_ask_button)
+
+	var close_btn := Button.new()
+	close_btn.text = "Close (Esc)"
+	close_btn.pressed.connect(close_dialogue)
+	vbox.add_child(close_btn)
+
+
+func _build_accusation_panel() -> void:
+	accusation_panel = Panel.new()
+	accusation_panel.set_anchors_preset(Control.PRESET_CENTER)
+	accusation_panel.size = Vector2(480, 260)
+	accusation_panel.position = Vector2(-240, -130)
+	accusation_panel.visible = false
+	ui_layer.add_child(accusation_panel)
+
+	var vbox := VBoxContainer.new()
+	vbox.set_anchors_preset(Control.PRESET_FULL_RECT)
+	vbox.offset_left = 16
+	vbox.offset_top = 16
+	vbox.offset_right = -16
+	vbox.offset_bottom = -16
+	vbox.add_theme_constant_override("separation", 10)
+	accusation_panel.add_child(vbox)
+
+	var title := Label.new()
+	title.text = "Who is the murderer?"
+	title.add_theme_font_size_override("font_size", 22)
+	vbox.add_child(title)
+
+	var subtitle := Label.new()
+	subtitle.text = "Type a suspect's name and make your final accusation."
+	subtitle.autowrap_mode = TextServer.AUTOWRAP_WORD
+	vbox.add_child(subtitle)
+
+	accusation_input = LineEdit.new()
+	accusation_input.placeholder_text = "e.g. Marcus Sterling"
+	accusation_input.text_submitted.connect(func(_t): _submit_accusation())
+	vbox.add_child(accusation_input)
+
+	var hbox := HBoxContainer.new()
+	vbox.add_child(hbox)
+
+	var accuse_btn := Button.new()
+	accuse_btn.text = "Accuse"
+	accuse_btn.pressed.connect(_submit_accusation)
+	hbox.add_child(accuse_btn)
+
+	var cancel_btn := Button.new()
+	cancel_btn.text = "Cancel (Esc)"
+	cancel_btn.pressed.connect(close_accusation)
+	hbox.add_child(cancel_btn)
+
+	accusation_result_label = Label.new()
+	accusation_result_label.add_theme_color_override("font_color", Color(1, 0.5, 0.5))
+	accusation_result_label.autowrap_mode = TextServer.AUTOWRAP_WORD
+	vbox.add_child(accusation_result_label)
+
+
+func _build_notes_panel() -> void:
+	notes_panel = Panel.new()
+	notes_panel.set_anchors_preset(Control.PRESET_CENTER)
+
+	# Twice the original size (760x520 -> 1520x1040), but clamped so it can
+	# never overflow off-screen on a smaller monitor/window.
+	var vp_size: Vector2 = get_viewport().get_visible_rect().size
+	var max_size: Vector2 = vp_size - Vector2(40, 40)
+	var panel_size := Vector2(min(1520.0, max_size.x), min(1040.0, max_size.y))
+	notes_panel.size = panel_size
+	notes_panel.position = -panel_size / 2.0
+	notes_panel.visible = false
+	ui_layer.add_child(notes_panel)
+
+	var outer_vbox := VBoxContainer.new()
+	outer_vbox.set_anchors_preset(Control.PRESET_FULL_RECT)
+	outer_vbox.offset_left = 16
+	outer_vbox.offset_top = 16
+	outer_vbox.offset_right = -16
+	outer_vbox.offset_bottom = -16
+	outer_vbox.add_theme_constant_override("separation", 10)
+	notes_panel.add_child(outer_vbox)
+
+	var title := Label.new()
+	title.text = "Case Notes"
+	title.add_theme_font_size_override("font_size", 24)
+	outer_vbox.add_child(title)
+
+	var hbox := HBoxContainer.new()
+	hbox.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	hbox.add_theme_constant_override("separation", 14)
+	outer_vbox.add_child(hbox)
+
+	# Left column: one tab per suspect, colored to match their body color in
+	# the mansion, dimmed if you haven't talked to them yet, with a small
+	# red dot if their Slipups section has real content worth checking.
+	var tabs_vbox := VBoxContainer.new()
+	tabs_vbox.custom_minimum_size = Vector2(190, 0)
+	tabs_vbox.add_theme_constant_override("separation", 6)
+	hbox.add_child(tabs_vbox)
+
+	notes_tab_buttons.clear()
+	notes_flag_dots.clear()
+	for c in GameManager.CHARACTERS:
+		var id: String = c["id"]
+		var color: Color = NPC_COLORS.get(id, Color.WHITE)
+
+		var row := HBoxContainer.new()
+		row.add_theme_constant_override("separation", 6)
+		tabs_vbox.add_child(row)
+
+		var btn := Button.new()
+		btn.text = String(c["short"])
+		btn.custom_minimum_size = Vector2(160, 36)
+		btn.alignment = HORIZONTAL_ALIGNMENT_LEFT
+		btn.add_theme_font_size_override("font_size", 16)
+		btn.add_theme_color_override("font_color", color)
+		btn.add_theme_color_override("font_hover_color", color)
+		btn.add_theme_color_override("font_pressed_color", color)
+		btn.pressed.connect(func(): _select_notes_character(id))
+		row.add_child(btn)
+
+		var dot := ColorRect.new()
+		dot.color = Color(1, 0.25, 0.25)
+		dot.custom_minimum_size = Vector2(10, 10)
+		dot.size = Vector2(10, 10)
+		dot.visible = false
+		row.add_child(dot)
+
+		notes_tab_buttons[id] = btn
+		notes_flag_dots[id] = dot
+
+	# Right pane: the selected suspect's Timeline / Motive / Slipups.
+	notes_log = RichTextLabel.new()
+	notes_log.bbcode_enabled = true
+	notes_log.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	notes_log.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	notes_log.add_theme_font_size_override("normal_font_size", 18)
+	hbox.add_child(notes_log)
+
+	var close_btn := Button.new()
+	close_btn.text = "Close (Tab)"
+	close_btn.pressed.connect(toggle_notes)
+	outer_vbox.add_child(close_btn)
+
+
+func _build_win_panel() -> void:
+	win_panel = Panel.new()
+	win_panel.set_anchors_preset(Control.PRESET_CENTER)
+	win_panel.size = Vector2(480, 240)
+	win_panel.position = Vector2(-240, -120)
+	win_panel.visible = false
+	ui_layer.add_child(win_panel)
+
+	var vbox := VBoxContainer.new()
+	vbox.set_anchors_preset(Control.PRESET_FULL_RECT)
+	vbox.offset_left = 16
+	vbox.offset_top = 16
+	vbox.offset_right = -16
+	vbox.offset_bottom = -16
+	win_panel.add_child(vbox)
+
+	win_label = Label.new()
+	win_label.autowrap_mode = TextServer.AUTOWRAP_WORD
+	win_label.add_theme_font_size_override("font_size", 22)
+	vbox.add_child(win_label)
+
+	var restart_btn := Button.new()
+	restart_btn.text = "Play Again (new random murderer)"
+	restart_btn.pressed.connect(func(): get_tree().reload_current_scene())
+	vbox.add_child(restart_btn)
+
+
+# --------------------------------------------------------- name coloring --
+# Wherever conversation or notes text mentions a suspect by name, that name
+# gets colored to match their body color in the mansion (e.g. if Victoria
+# mentions Marcus, "Marcus" shows up in his red). The murder victim, Lord
+# Reginald Archibald, isn't a suspect (he has no body/color in the mansion),
+# so his name gets bold+underlined instead.
+
+# Common titles/honorifics the model might place directly in front of a
+# name ("Lady Victoria", "Mr. Sterling", "Dr. Blackwood", ...). Included as
+# an OPTIONAL prefix on every pattern so the whole phrase gets styled
+# together instead of just the bare name.
+const HONORIFIC_GROUP := "(?:Lord|Lady|Mr|Mrs|Ms|Miss|Dr|Sir)\\.?\\s+"
+
+var victim_regex: RegEx = null
+
+
+## All the distinct ways this suspect might reasonably be referred to:
+## surname, formal first name, nickname/short name, and "first + surname" /
+## "nickname + surname" combos. Using an explicit first_name field (rather
+## than trying to parse it out of the display name) is what makes sure a
+## formal first name like "Samuel" is caught even though his short name is
+## the nickname "Sam".
+func _name_variants(c: Dictionary) -> Array:
+	var full := String(c["name"]).replace('"', "")
+	while full.find("  ") != -1: # collapse double spaces left by removing a quoted nickname
+		full = full.replace("  ", " ")
+	var parts := full.split(" ")
+	var surname := String(parts[parts.size() - 1]) if parts.size() > 0 else ""
+	var first_name := String(c.get("first_name", c["short"]))
+	var short := String(c["short"])
+
+	var candidates := [full, first_name, short, surname]
+	if surname != "":
+		candidates.append("%s %s" % [first_name, surname])
+		candidates.append("%s %s" % [short, surname])
+
+	var seen := {}
+	var out := []
+	for cand in candidates:
+		var key := String(cand).strip_edges()
+		if key == "":
+			continue
+		var lk := key.to_lower()
+		if seen.has(lk):
+			continue
+		seen[lk] = true
+		out.append(key)
+	return out
+
+
+func _regex_escape(s: String) -> String:
+	var special := ["\\", ".", "^", "$", "*", "+", "?", "(", ")", "[", "]", "{", "}", "|"]
+	var out := s
+	for ch in special:
+		out = out.replace(ch, "\\" + ch)
+	return out
+
+
+func _sorted_escaped(variants: Array) -> PackedStringArray:
+	var sorted_variants := variants.duplicate()
+	# Longest first, so e.g. "Marcus Sterling" is preferred over lone
+	# "Marcus" when both could match at the same position.
+	sorted_variants.sort_custom(func(a, b): return String(a).length() > String(b).length())
+	var escaped := PackedStringArray()
+	for v in sorted_variants:
+		escaped.append(_regex_escape(String(v)))
+	return escaped
+
+
+## Builds one compiled regex per suspect matching all of their unambiguous
+## name variants (full name, first name, nickname, surname, combos). A
+## variant shared by more than one suspect (e.g. "Cross" belongs to both
+## Natalie and Eugene) is dropped for everyone rather than guessing the
+## wrong color.
+func _build_name_regexes() -> void:
+	var variant_owner: Dictionary = {} # lowercase variant -> character_id, or "AMBIGUOUS"
+	var variants_by_char: Dictionary = {} # character_id -> Array[String]
+
+	for c in GameManager.CHARACTERS:
+		var id: String = c["id"]
+		var variants: Array = _name_variants(c)
+		variants_by_char[id] = variants
+		for v in variants:
+			var key: String = v.to_lower()
+			if variant_owner.has(key) and variant_owner[key] != id:
+				variant_owner[key] = "AMBIGUOUS"
+			elif not variant_owner.has(key):
+				variant_owner[key] = id
+
+	name_regexes.clear()
+	for c in GameManager.CHARACTERS:
+		var id: String = c["id"]
+		var valid_variants: Array = []
+		for v in variants_by_char[id]:
+			if variant_owner.get(String(v).to_lower(), "") == id:
+				valid_variants.append(v)
+		if valid_variants.is_empty():
+			continue
+
+		var escaped := _sorted_escaped(valid_variants)
+		var pattern := "(?i)\\b(?:" + HONORIFIC_GROUP + ")?(?:" + "|".join(escaped) + ")\\b"
+
+		var re := RegEx.new()
+		if re.compile(pattern) == OK:
+			name_regexes[id] = re
+
+	_build_victim_regex()
+
+
+## The victim isn't a suspect, but comes up constantly in questions/answers.
+## Matches "Lord Reginald Archibald" and shorter forms of it.
+func _build_victim_regex() -> void:
+	var raw := String(GameManager.VICTIM_NAME) # "Lord Reginald Archibald"
+	var parts := raw.split(" ")
+	var candidates := [raw]
+	if parts.size() >= 3:
+		candidates.append("%s %s" % [parts[1], parts[2]]) # "Reginald Archibald"
+		candidates.append("%s %s" % [parts[0], parts[2]]) # "Lord Archibald"
+		candidates.append(String(parts[1])) # "Reginald"
+		candidates.append(String(parts[2])) # "Archibald"
+	elif parts.size() > 0:
+		candidates.append(String(parts[parts.size() - 1]))
+
+	var seen := {}
+	var unique_candidates := []
+	for cand in candidates:
+		var lk := String(cand).to_lower()
+		if seen.has(lk):
+			continue
+		seen[lk] = true
+		unique_candidates.append(String(cand))
+
+	var escaped := _sorted_escaped(unique_candidates)
+	var pattern := "(?i)\\b(?:" + HONORIFIC_GROUP + ")?(?:" + "|".join(escaped) + ")\\b"
+
+	victim_regex = RegEx.new()
+	if victim_regex.compile(pattern) != OK:
+		victim_regex = null
+
+
+## Wraps every mention of the victim in bold+underline, and every mention of
+## a known suspect's name in `text` with a [color=#hex] tag matching that
+## suspect's body color.
+func _colorize_names(text: String) -> String:
+	var result := text
+	if victim_regex != null:
+		result = victim_regex.sub(result, "[b][u]$0[/u][/b]", true)
+	for id in name_regexes.keys():
+		var re: RegEx = name_regexes[id]
+		var color: Color = NPC_COLORS.get(id, Color.WHITE)
+		result = re.sub(result, "[color=#%s]$0[/color]" % color.to_html(false), true)
+	return result
+
+
+# ----------------------------------------------------------- UI behaviour --
+
+func show_prompt(text: String) -> void:
+	prompt_label.text = text
+	prompt_label.visible = true
+
+
+func hide_prompt() -> void:
+	prompt_label.visible = false
+
+
+func open_dialogue(character_id: String) -> void:
+	if win_panel.visible:
+		return
+	current_dialogue_character = character_id
+	var c := GameManager.get_character(character_id)
+	dialogue_name_label.text = String(c.get("name", ""))
+	dialogue_name_label.add_theme_color_override("font_color", NPC_COLORS.get(character_id, Color.WHITE))
+	dialogue_log.clear()
+	for entry in GameManager.transcript:
+		if entry["character_id"] == character_id:
+			_append_transcript_entry(entry)
+	dialogue_status_label.text = ""
+	dialogue_input.editable = true
+	dialogue_ask_button.disabled = false
+	dialogue_panel.visible = true
+	player.set_mouse_captured(false)
+	dialogue_input.grab_focus()
+
+
+func close_dialogue() -> void:
+	dialogue_panel.visible = false
+	current_dialogue_character = ""
+	player.set_mouse_captured(true)
+
+
+func _append_transcript_entry(entry: Dictionary) -> void:
+	var c := GameManager.get_character(entry["character_id"])
+	var speaker_color: Color = NPC_COLORS.get(entry["character_id"], Color(1, 0.82, 0.5))
+	dialogue_log.append_text("[b]You:[/b] %s\n" % _colorize_names(String(entry["question"])))
+	dialogue_log.append_text("[b][color=#%s]%s:[/color][/b] %s\n\n" % [speaker_color.to_html(false), String(c.get("short", "")), _colorize_names(String(entry["answer"]))])
+
+
+func _send_question() -> void:
+	var q := dialogue_input.text.strip_edges()
+	if q == "" or current_dialogue_character == "":
+		return
+	dialogue_input.text = ""
+	dialogue_input.editable = false
+	dialogue_ask_button.disabled = true
+	var c := GameManager.get_character(current_dialogue_character)
+	dialogue_status_label.text = "%s is thinking..." % String(c.get("short", ""))
+	GameManager.ask_character(current_dialogue_character, q)
+
+
+func _on_ollama_response(character_id: String, _text: String) -> void:
+	if character_id == current_dialogue_character:
+		dialogue_status_label.text = ""
+		var last: Dictionary = GameManager.transcript[GameManager.transcript.size() - 1]
+		_append_transcript_entry(last)
+		dialogue_input.editable = true
+		dialogue_ask_button.disabled = false
+		dialogue_input.grab_focus()
+	# Dialogue can't actually be open at the same time as the Notes panel
+	# (opening Notes releases the mouse, which disables interaction), but
+	# keep this in sync just in case that ever changes.
+	if notes_panel.visible and notes_selected_char == character_id:
+		_render_notes_content(character_id)
+
+
+func _on_ollama_error(character_id: String, message: String) -> void:
+	if character_id == current_dialogue_character:
+		dialogue_status_label.text = "Error: " + message
+		dialogue_input.editable = true
+		dialogue_ask_button.disabled = false
+
+
+func open_accusation() -> void:
+	close_dialogue()
+	accusation_result_label.text = ""
+	accusation_input.text = ""
+	accusation_panel.visible = true
+	player.set_mouse_captured(false)
+	accusation_input.grab_focus()
+
+
+func close_accusation() -> void:
+	accusation_panel.visible = false
+	player.set_mouse_captured(true)
+
+
+func _submit_accusation() -> void:
+	var guess := accusation_input.text.strip_edges()
+	if guess == "":
+		return
+	if GameManager.check_accusation(guess):
+		accusation_panel.visible = false
+		var c := GameManager.get_character(GameManager.murderer_id)
+		win_label.text = "Case closed! %s was the murderer.\n\nMotive: %s" % [String(c.get("name", "")), String(c.get("flavor", ""))]
+		win_panel.visible = true
+		player.set_mouse_captured(false)
+	else:
+		accusation_result_label.text = "That's not who the evidence points to. Keep investigating..."
+
+
+func toggle_notes() -> void:
+	if win_panel.visible:
+		return
+	notes_panel.visible = not notes_panel.visible
+	if notes_panel.visible:
+		# Default to whichever suspect was showing last time, unless you
+		# haven't talked to them (or anyone) - then pick the first suspect
+		# with any conversation.
+		if notes_selected_char == "" or GameManager.get_transcript_for(notes_selected_char).is_empty():
+			notes_selected_char = _first_interviewed_character()
+		_select_notes_character(notes_selected_char)
+		player.set_mouse_captured(false)
+	elif not dialogue_panel.visible and not accusation_panel.visible:
+		player.set_mouse_captured(true)
+
+
+func _first_interviewed_character() -> String:
+	for c in GameManager.CHARACTERS:
+		if not GameManager.get_transcript_for(c["id"]).is_empty():
+			return c["id"]
+	return ""
+
+
+## Switches the right-hand pane to a suspect, kicking off a summary request
+## for them (lazily, per-tab, rather than for everyone at once) if their
+## conversation has grown since their last summary and one isn't already in
+## flight.
+func _select_notes_character(id: String) -> void:
+	notes_selected_char = id
+	_update_notes_tab_styles()
+	if id != "" and not _pending_summaries.has(id) and GameManager.needs_summary_refresh(id):
+		_pending_summaries[id] = true
+		GameManager.request_summary(id)
+	_render_notes_content(id)
+
+
+## Refreshes every tab's three indicators: a highlighted background if it's
+## the currently selected suspect, dimming if you haven't talked to them
+## yet, and a red dot if their Slipups section has real content. Tab text
+## color itself always stays that suspect's body color and is never
+## overridden, so it stays consistent whether selected or not.
+func _update_notes_tab_styles() -> void:
+	for id in notes_tab_buttons.keys():
+		var btn: Button = notes_tab_buttons[id]
+		var talked: bool = not GameManager.get_transcript_for(id).is_empty()
+		btn.modulate = Color(1, 1, 1, 1.0) if talked else Color(1, 1, 1, 0.4)
+
+		if id == notes_selected_char:
+			btn.add_theme_stylebox_override("normal", _selected_tab_stylebox())
+			btn.add_theme_stylebox_override("hover", _selected_tab_stylebox())
+		else:
+			btn.remove_theme_stylebox_override("normal")
+			btn.remove_theme_stylebox_override("hover")
+
+		var dot: ColorRect = notes_flag_dots.get(id)
+		if dot:
+			dot.visible = _has_slipup_flag(id)
+
+
+func _selected_tab_stylebox() -> StyleBoxFlat:
+	var sb := StyleBoxFlat.new()
+	sb.bg_color = Color(1, 1, 1, 0.16)
+	sb.corner_radius_top_left = 4
+	sb.corner_radius_top_right = 4
+	sb.corner_radius_bottom_left = 4
+	sb.corner_radius_bottom_right = 4
+	sb.content_margin_left = 6
+	return sb
+
+
+## True if a suspect's Slipups section has real, non-empty content - as
+## opposed to being blank or the model's "nothing notable" placeholder.
+func _has_slipup_flag(id: String) -> bool:
+	var summary: Dictionary = GameManager.get_summary(id)
+	if summary.is_empty():
+		return false
+	var s: String = String(summary.get("slipups", "")).strip_edges().to_lower()
+	if s == "":
+		return false
+	var negative_markers := ["nothing notable", "nothing relevant", "nothing suspicious", "no slip", "n/a", "none yet", "none noted"]
+	for m in negative_markers:
+		if s.find(m) != -1:
+			return false
+	return true
+
+
+func _on_summary_ready(character_id: String, _text: String) -> void:
+	_pending_summaries.erase(character_id)
+	if not notes_panel.visible:
+		return
+	_update_notes_tab_styles() # refreshes that suspect's slipup flag dot
+	if notes_selected_char == character_id:
+		_render_notes_content(character_id)
+
+
+func _on_summary_error(character_id: String, _message: String) -> void:
+	_pending_summaries.erase(character_id)
+	if not notes_panel.visible:
+		return
+	_update_notes_tab_styles()
+	if notes_selected_char == character_id:
+		_render_notes_content(character_id)
+
+
+## Renders the right-hand pane for one suspect: their Timeline / Motive /
+## Slipups sections, a "Summarizing..." placeholder while one's in flight,
+## or a raw Q&A fallback if no summary is available (nothing asked yet, or
+## the last summarization attempt failed).
+func _render_notes_content(id: String) -> void:
+	notes_log.clear()
+	if id == "":
+		notes_log.append_text("Talk to a suspect, then check back here.")
+		return
+
+	var c := GameManager.get_character(id)
+	var name_color: Color = NPC_COLORS.get(id, Color.WHITE)
+	notes_log.append_text("[b][color=#%s]%s[/color][/b] [color=#999999](%s)[/color]\n\n" % [name_color.to_html(false), String(c.get("name", "")), String(c.get("job", ""))])
+
+	var entries: Array = GameManager.get_transcript_for(id)
+	if entries.is_empty():
+		notes_log.append_text("You haven't asked %s anything yet." % String(c.get("short", "them")))
+		return
+
+	if _pending_summaries.has(id):
+		notes_log.append_text("[i]Summarizing...[/i]")
+		return
+
+	var summary: Dictionary = GameManager.get_summary(id)
+	if summary.is_empty():
+		# No structured summary available - fall back to this suspect's raw Q&A.
+		for e in entries:
+			notes_log.append_text("Q: %s\nA: %s\n\n" % [_colorize_names(String(e["question"])), _colorize_names(String(e["answer"]))])
+		return
+
+	notes_log.append_text("[b][color=#8fd3ff]TIMELINE[/color][/b]\n%s\n\n" % _colorize_names(_section_or_placeholder(summary.get("timeline", ""))))
+	notes_log.append_text("[b][color=#ffb37a]POTENTIAL REASON TO KILL[/color][/b]\n%s\n\n" % _colorize_names(_section_or_placeholder(summary.get("motive", ""))))
+	notes_log.append_text("[b][color=#ff8f8f]SLIPUPS[/color][/b]\n%s\n\n" % _colorize_names(_section_or_placeholder(summary.get("slipups", ""))))
+
+
+func _section_or_placeholder(text: String) -> String:
+	var t := String(text).strip_edges()
+	if t == "":
+		return "Nothing notable yet."
+	return t
+
+
+# --------------------------------------------------------------- debug UI --
+# A dev/testing aid so you don't have to interrogate all 8 suspects just to
+# confirm the murderer logic is working. This is meant for testing only -
+# remove the F1 binding (in GameManager._setup_input_map) before sharing
+# builds with anyone you actually want to keep guessing.
+
+func toggle_debug() -> void:
+	debug_label.visible = not debug_label.visible
+	if debug_label.visible:
+		_refresh_debug_label()
+
+
+func _refresh_debug_label() -> void:
+	var c := GameManager.get_character(GameManager.murderer_id)
+	debug_label.text = "[DEBUG] Murderer: %s\nWeapon: %s\nTime: %s" % [String(c.get("name", "?")), GameManager.murder_weapon, GameManager.murder_time]
