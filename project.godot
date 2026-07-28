@@ -11,12 +11,12 @@ config_version=5
 [application]
 
 config/name="Archibald Manor: A Clue Mystery"
-run/main_scene="res://Main.tscn"
+run/main_scene="res://Scenes/Main.tscn"
 config/features=PackedStringArray("4.7", "Forward Plus")
 
 [autoload]
 
-GameManager="*res://scripts/GameManager.gd"
+GameManager="*res://Scripts/GameManager.gd"
 
 [display]
 
