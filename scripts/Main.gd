@@ -64,7 +64,9 @@ var dialogue_status_label: Label
 var current_dialogue_character: String = ""
 
 var accusation_panel: Panel
-var accusation_input: LineEdit
+var accusation_suspect_buttons: Dictionary = {} # character_id -> Button
+var accusation_selected_id: String = ""
+var accusation_accuse_button: Button
 var accusation_result_label: Label
 
 var notes_panel: Panel
@@ -637,8 +639,8 @@ func _build_dialogue_panel() -> void:
 func _build_accusation_panel() -> void:
 	accusation_panel = Panel.new()
 	accusation_panel.set_anchors_preset(Control.PRESET_CENTER)
-	accusation_panel.size = Vector2(480, 260)
-	accusation_panel.position = Vector2(-240, -130)
+	accusation_panel.size = Vector2(480, 480)
+	accusation_panel.position = Vector2(-240, -240)
 	accusation_panel.visible = false
 	ui_layer.add_child(accusation_panel)
 
@@ -657,22 +659,47 @@ func _build_accusation_panel() -> void:
 	vbox.add_child(title)
 
 	var subtitle := Label.new()
-	subtitle.text = "Type a suspect's name and make your final accusation."
+	subtitle.text = "Select a suspect below and make your final accusation."
 	subtitle.autowrap_mode = TextServer.AUTOWRAP_WORD
 	vbox.add_child(subtitle)
 
-	accusation_input = LineEdit.new()
-	accusation_input.placeholder_text = "e.g. Marcus Sterling"
-	accusation_input.text_submitted.connect(func(_t): _submit_accusation())
-	vbox.add_child(accusation_input)
+	# One button per suspect actually in this game (matches the Case Notes
+	# tabs), colored to match their body color in the mansion. Clicking one
+	# selects it (highlighted, like the notes tabs) rather than typing a name.
+	var scroll := ScrollContainer.new()
+	scroll.custom_minimum_size = Vector2(0, 240)
+	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	vbox.add_child(scroll)
+
+	var list_vbox := VBoxContainer.new()
+	list_vbox.add_theme_constant_override("separation", 4)
+	list_vbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	scroll.add_child(list_vbox)
+
+	accusation_suspect_buttons.clear()
+	for c in GameManager.active_characters():
+		var id: String = c["id"]
+		var color: Color = NPC_COLORS.get(id, Color.WHITE)
+		var btn := Button.new()
+		btn.text = String(c["name"])
+		btn.custom_minimum_size = Vector2(0, 36)
+		btn.alignment = HORIZONTAL_ALIGNMENT_LEFT
+		btn.add_theme_font_size_override("font_size", 16)
+		btn.add_theme_color_override("font_color", color)
+		btn.add_theme_color_override("font_hover_color", color)
+		btn.add_theme_color_override("font_pressed_color", color)
+		btn.pressed.connect(_select_accusation_suspect.bind(id))
+		list_vbox.add_child(btn)
+		accusation_suspect_buttons[id] = btn
 
 	var hbox := HBoxContainer.new()
 	vbox.add_child(hbox)
 
-	var accuse_btn := Button.new()
-	accuse_btn.text = "Accuse"
-	accuse_btn.pressed.connect(_submit_accusation)
-	hbox.add_child(accuse_btn)
+	accusation_accuse_button = Button.new()
+	accusation_accuse_button.text = "Accuse"
+	accusation_accuse_button.disabled = true
+	accusation_accuse_button.pressed.connect(_submit_accusation)
+	hbox.add_child(accusation_accuse_button)
 
 	var cancel_btn := Button.new()
 	cancel_btn.text = "Cancel (Esc)"
@@ -683,6 +710,21 @@ func _build_accusation_panel() -> void:
 	accusation_result_label.add_theme_color_override("font_color", Color(1, 0.5, 0.5))
 	accusation_result_label.autowrap_mode = TextServer.AUTOWRAP_WORD
 	vbox.add_child(accusation_result_label)
+
+
+## Highlights the clicked suspect button (matching the Case Notes tab style)
+## and enables the Accuse button once something is selected.
+func _select_accusation_suspect(id: String) -> void:
+	accusation_selected_id = id
+	accusation_accuse_button.disabled = false
+	for bid in accusation_suspect_buttons.keys():
+		var btn: Button = accusation_suspect_buttons[bid]
+		if bid == id:
+			btn.add_theme_stylebox_override("normal", _selected_tab_stylebox())
+			btn.add_theme_stylebox_override("hover", _selected_tab_stylebox())
+		else:
+			btn.remove_theme_stylebox_override("normal")
+			btn.remove_theme_stylebox_override("hover")
 
 
 func _build_notes_panel() -> void:
@@ -1032,10 +1074,14 @@ func _on_ollama_error(character_id: String, message: String) -> void:
 func open_accusation() -> void:
 	close_dialogue()
 	accusation_result_label.text = ""
-	accusation_input.text = ""
+	accusation_selected_id = ""
+	accusation_accuse_button.disabled = true
+	for bid in accusation_suspect_buttons.keys():
+		var btn: Button = accusation_suspect_buttons[bid]
+		btn.remove_theme_stylebox_override("normal")
+		btn.remove_theme_stylebox_override("hover")
 	accusation_panel.visible = true
 	player.set_mouse_captured(false)
-	accusation_input.grab_focus()
 
 
 func close_accusation() -> void:
@@ -1044,17 +1090,17 @@ func close_accusation() -> void:
 
 
 func _submit_accusation() -> void:
-	var guess := accusation_input.text.strip_edges()
-	if guess == "":
+	if accusation_selected_id == "":
 		return
-	if GameManager.check_accusation(guess):
+	if GameManager.check_accusation(accusation_selected_id):
 		accusation_panel.visible = false
 		var c := GameManager.get_character(GameManager.murderer_id)
 		win_label.text = "Case closed! %s was the murderer.\n\nMotive: %s" % [String(c.get("name", "")), String(c.get("flavor", ""))]
 		win_panel.visible = true
 		player.set_mouse_captured(false)
 	else:
-		accusation_result_label.text = "That's not who the evidence points to. Keep investigating..."
+		var c := GameManager.get_character(accusation_selected_id)
+		accusation_result_label.text = "%s isn't who the evidence points to. Keep investigating..." % String(c.get("short", "That suspect"))
 
 
 func toggle_notes() -> void:
