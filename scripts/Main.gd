@@ -48,8 +48,18 @@ const NPC_COLORS := {
 
 var rooms_node: Node3D
 var room_centers: Dictionary = {}
+var grid_pos: Dictionary = {} # room name -> Vector2i(row, col), for pathing between rooms
 var player: CharacterBody3D
 var front_door_node = null
+
+var npc_nodes: Dictionary = {} # character_id -> spawned NPCCharacter node
+
+# Movement commands typed straight into the dialogue box, e.g. "go to the
+# library" or "wait in the study" - detected with plain regex (no extra
+# Ollama round-trip) rather than sent through GameManager as a question.
+var room_name_lookup: Dictionary = {} # lowercase room name -> canonical room name
+var move_command_regex: RegEx = null
+var wait_command_regex: RegEx = null
 
 var ui_layer: CanvasLayer
 var crosshair: ColorRect
@@ -95,6 +105,9 @@ func _ready() -> void:
 	GameManager.ollama_error.connect(_on_ollama_error)
 	GameManager.summary_ready.connect(_on_summary_ready)
 	GameManager.summary_error.connect(_on_summary_error)
+
+	_build_room_name_lookup()
+	_build_move_command_regexes()
 
 	# The mouse may still be captured (MOUSE_MODE_CAPTURED) from a previous
 	# game if this is a "Play Again" scene reload - make sure it's free so
@@ -367,6 +380,7 @@ func _build_mansion() -> void:
 			var rname: String = GRID[row][col]
 			var center := _room_center(row, col)
 			room_centers[rname] = center
+			grid_pos[rname] = Vector2i(row, col)
 			_build_room(rname, center, row, col)
 
 
@@ -458,14 +472,17 @@ func _build_front_door(pos: Vector3) -> void:
 # -------------------------------------------------------------- characters --
 
 func _spawn_npcs() -> void:
+	npc_nodes.clear()
 	for c in GameManager.active_characters():
 		var center: Vector3 = room_centers.get(c["room"], Vector3.ZERO)
-		var npc := StaticBody3D.new()
+		var npc := CharacterBody3D.new()
 		npc.name = "NPC_" + c["id"]
 		npc.set_script(load("res://Scripts/NPCCharacter.gd"))
 		rooms_node.add_child(npc)
 		npc.character_id = c["id"]
+		npc.current_room = c["room"]
 		npc.position = Vector3(center.x + randf_range(-2.5, 2.5), 0, center.z + randf_range(-2.5, 2.5))
+		npc_nodes[c["id"]] = npc
 
 		var mesh := MeshInstance3D.new()
 		var cap := CapsuleMesh.new()
@@ -493,6 +510,167 @@ func _spawn_npcs() -> void:
 		label.outline_size = 10
 		label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
 		npc.add_child(label)
+
+
+# ------------------------------------------------------- room navigation --
+# NPCs wander freely within whichever room they currently belong to, but a
+# "go to <room>" command typed in the dialogue box needs an actual path
+# through the mansion's doorways since the 9 rooms are only connected to
+# their orthogonal neighbors in the 3x3 GRID. get_room_travel_waypoints()
+# does a short BFS over that grid and turns the room-name path into a list
+# of world-space points (each doorway crossing, then the room's center)
+# that NPCCharacter.begin_travel() walks through in order.
+
+func _build_room_name_lookup() -> void:
+	room_name_lookup.clear()
+	for row in GRID:
+		for rname in row:
+			room_name_lookup[String(rname).to_lower()] = rname
+
+
+## Builds the two regexes used to detect a movement instruction typed into
+## the dialogue box: "go/move/walk/head ... to ... <room>" and
+## "wait/stay ... in ... <room>". Reuses _sorted_escaped() (already used for
+## suspect-name coloring) so room names are escaped and tried longest-first.
+func _build_move_command_regexes() -> void:
+	var room_names := []
+	for row in GRID:
+		for rname in row:
+			room_names.append(rname)
+	var escaped := _sorted_escaped(room_names)
+	var alt := "|".join(escaped)
+
+	move_command_regex = RegEx.new()
+	move_command_regex.compile("(?i)\\b(?:go|move|walk|head)\\b[^\\n]{0,20}?\\bto\\b[^\\n]{0,12}?\\b(" + alt + ")\\b")
+
+	wait_command_regex = RegEx.new()
+	wait_command_regex.compile("(?i)\\b(?:wait|stay)\\b[^\\n]{0,15}?\\bin\\b[^\\n]{0,12}?\\b(" + alt + ")\\b")
+
+
+## Returns the canonical room name if `text` reads as a movement instruction,
+## or "" if it doesn't (including anything with a "?" in it, which is treated
+## as a real question - "Did you go to the kitchen?" should still be asked to
+## the character rather than acted on).
+func _parse_move_command(text: String) -> String:
+	if text.find("?") != -1:
+		return ""
+	if move_command_regex == null or wait_command_regex == null:
+		return ""
+	var m := move_command_regex.search(text)
+	if m == null:
+		m = wait_command_regex.search(text)
+	if m == null:
+		return ""
+	return String(room_name_lookup.get(m.get_string(1).to_lower(), ""))
+
+
+## Shortest path (in room names, excluding `from_room`) between two rooms
+## over the 3x3 GRID, treating every orthogonally adjacent pair of rooms as
+## connected (every internal wall in the mansion has a doorway gap - see
+## _build_wall_side). Returns [] if there's no path or from == to.
+func _room_bfs_path(from_room: String, to_room: String) -> Array:
+	if from_room == to_room:
+		return []
+	if not grid_pos.has(from_room) or not grid_pos.has(to_room):
+		return []
+	var start: Vector2i = grid_pos[from_room]
+	var goal: Vector2i = grid_pos[to_room]
+
+	var visited := {start: true}
+	var prev := {}
+	var queue := [start]
+	var found := start == goal
+
+	while not queue.is_empty() and not found:
+		var cur: Vector2i = queue.pop_front()
+		for d in [Vector2i(-1, 0), Vector2i(1, 0), Vector2i(0, -1), Vector2i(0, 1)]:
+			var nxt: Vector2i = cur + d
+			if nxt.x < 0 or nxt.x >= GRID.size() or nxt.y < 0 or nxt.y >= GRID[0].size():
+				continue
+			if visited.has(nxt):
+				continue
+			visited[nxt] = true
+			prev[nxt] = cur
+			if nxt == goal:
+				found = true
+				break
+			queue.append(nxt)
+
+	if not found:
+		return []
+
+	var name_by_pos := {}
+	for rname in grid_pos.keys():
+		name_by_pos[grid_pos[rname]] = rname
+
+	var rev_path := [goal]
+	var cur2: Vector2i = goal
+	while cur2 != start:
+		cur2 = prev[cur2]
+		rev_path.append(cur2)
+	rev_path.reverse()
+
+	var out := []
+	for i in range(1, rev_path.size()):
+		out.append(name_by_pos[rev_path[i]])
+	return out
+
+
+## Turns a room-name path into world-space waypoints: the doorway crossing
+## (midpoint between the two room centers - always lines up with the
+## doorway gap since it's centered on that shared wall) followed by the
+## room's own center, for every room passed through on the way to `to_room`.
+func get_room_travel_waypoints(from_room: String, to_room: String) -> Array:
+	var path := _room_bfs_path(from_room, to_room)
+	if path.is_empty():
+		return []
+	var waypoints := []
+	var prev_center: Vector3 = room_centers.get(from_room, Vector3.ZERO)
+	for rname in path:
+		var center: Vector3 = room_centers[rname]
+		var doorway := (prev_center + center) / 2.0
+		doorway.y = 0.0
+		waypoints.append(doorway)
+		waypoints.append(center)
+		prev_center = center
+	return waypoints
+
+
+## Sends an NPC walking toward `room_name`. Returns a status string Main uses
+## to write a short acknowledgement into the dialogue log: "moving",
+## "already_there", "already_heading", or "invalid" (unknown character/room).
+func command_npc_move(character_id: String, room_name: String) -> String:
+	if not npc_nodes.has(character_id) or not room_centers.has(room_name):
+		return "invalid"
+	var npc = npc_nodes[character_id]
+	if npc.current_room == room_name:
+		return "already_heading" if npc.state == "moving" else "already_there"
+	var waypoints := get_room_travel_waypoints(npc.current_room, room_name)
+	if waypoints.is_empty():
+		return "invalid"
+	npc.begin_travel(waypoints, room_name)
+	return "moving"
+
+
+## Handles a movement instruction typed into the dialogue box instead of
+## sending it to GameManager/Ollama - logs the player's line plus a short
+## acknowledgement, and actually moves the NPC in the 3D world.
+func _handle_move_command(character_id: String, room_name: String, original_text: String) -> void:
+	var c := GameManager.get_character(character_id)
+	var short := String(c.get("short", "They"))
+	var status := command_npc_move(character_id, room_name)
+	var ack := ""
+	match status:
+		"moving":
+			ack = "%s heads off toward the %s." % [short, room_name]
+		"already_there":
+			ack = "%s is already in the %s." % [short, room_name]
+		"already_heading":
+			ack = "%s is already on the way to the %s." % [short, room_name]
+		_:
+			ack = "%s doesn't seem able to get there." % short
+	dialogue_log.append_text("[b]You:[/b] %s\n" % _colorize_names(original_text))
+	dialogue_log.append_text("[i]%s[/i]\n\n" % ack)
 
 
 func _spawn_player() -> void:
@@ -1042,6 +1220,14 @@ func _send_question() -> void:
 	if q == "" or current_dialogue_character == "":
 		return
 	dialogue_input.text = ""
+
+	# "Go to the library" / "wait in the study" etc. are handled locally as
+	# stage directions rather than sent to Ollama as an in-character question.
+	var move_room := _parse_move_command(q)
+	if move_room != "":
+		_handle_move_command(current_dialogue_character, move_room, q)
+		return
+
 	dialogue_input.editable = false
 	dialogue_ask_button.disabled = true
 	var c := GameManager.get_character(current_dialogue_character)
