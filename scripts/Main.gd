@@ -1186,7 +1186,11 @@ func hide_prompt() -> void:
 func open_dialogue(character_id: String) -> void:
 	if win_panel.visible:
 		return
+	# If some other suspect was somehow still held, release them first.
+	_set_npc_talking(current_dialogue_character, false)
 	current_dialogue_character = character_id
+	# Freeze this NPC in place (facing the player) for the conversation.
+	_set_npc_talking(character_id, true)
 	var c := GameManager.get_character(character_id)
 	dialogue_name_label.text = String(c.get("name", ""))
 	dialogue_name_label.add_theme_color_override("font_color", NPC_COLORS.get(character_id, Color.WHITE))
@@ -1204,8 +1208,24 @@ func open_dialogue(character_id: String) -> void:
 
 func close_dialogue() -> void:
 	dialogue_panel.visible = false
+	# Let the suspect get back to wandering / finish any walk they were on.
+	_set_npc_talking(current_dialogue_character, false)
 	current_dialogue_character = ""
 	player.set_mouse_captured(true)
+
+
+## Holds an NPC still while the player is talking to them, or releases them.
+## Safe to call with an empty/unknown id.
+func _set_npc_talking(character_id: String, talking: bool) -> void:
+	if character_id == "" or not npc_nodes.has(character_id):
+		return
+	var npc = npc_nodes[character_id]
+	if not is_instance_valid(npc):
+		return
+	if talking and is_instance_valid(player):
+		npc.set_talking(true, player.global_position)
+	else:
+		npc.set_talking(talking)
 
 
 func _append_transcript_entry(entry: Dictionary) -> void:

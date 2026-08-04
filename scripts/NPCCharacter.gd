@@ -33,6 +33,12 @@ var _has_wander_target: bool = false
 var _wander_wait: float = 0.0
 var _main = null
 
+## True while the player has this NPC's dialogue panel open. Movement is
+## suspended entirely so a suspect doesn't wander off mid-interrogation; the
+## underlying `state` and any remaining `_path` are left untouched so travel
+## resumes exactly where it left off once the conversation ends.
+var _is_talking: bool = false
+
 
 func _ready() -> void:
 	add_to_group("npc_characters")
@@ -53,6 +59,26 @@ func interact() -> void:
 		main.open_dialogue(character_id)
 
 
+## Called by Main when the player opens or closes this NPC's dialogue panel.
+## While talking the NPC stands still (and turns to face the player, if one is
+## given) rather than continuing to wander or walk its path.
+func set_talking(talking: bool, face_position: Vector3 = Vector3.INF) -> void:
+	_is_talking = talking
+	if talking:
+		velocity.x = 0.0
+		velocity.z = 0.0
+		# Drop any half-finished wander target so they pick a fresh spot when
+		# the conversation ends instead of resuming a now-stale walk.
+		if state == "wander":
+			_has_wander_target = false
+			_wander_wait = randf_range(WANDER_WAIT_MIN, WANDER_WAIT_MAX)
+		if face_position != Vector3.INF:
+			var to_player := face_position - global_position
+			to_player.y = 0.0
+			if to_player.length() > 0.05:
+				look_at(global_position + to_player.normalized(), Vector3.UP)
+
+
 ## Called by Main to send this NPC walking to a new room. `waypoints` is an
 ## ordered list of world-space points (doorway crossings, then that room's
 ## center, repeated per room passed through) ending inside `dest_room`; once
@@ -63,6 +89,10 @@ func begin_travel(waypoints: Array, dest_room: String) -> void:
 	current_room = dest_room
 	state = "moving"
 	_has_wander_target = false
+	# A "go to the library" order given during a conversation should take
+	# effect immediately, so an explicit travel command overrides the
+	# stand-still-while-talking hold.
+	_is_talking = false
 
 
 func _physics_process(delta: float) -> void:
@@ -70,6 +100,14 @@ func _physics_process(delta: float) -> void:
 		velocity.y -= GRAVITY * delta
 	else:
 		velocity.y = 0.0
+
+	# Frozen mid-conversation: hold position (gravity still applies) and skip
+	# wandering, pathing, and separation entirely.
+	if _is_talking:
+		velocity.x = 0.0
+		velocity.z = 0.0
+		move_and_slide()
+		return
 
 	var desired := Vector3.ZERO
 	if state == "moving":
