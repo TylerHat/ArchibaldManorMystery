@@ -5,7 +5,7 @@ extends Node
 # and checks the player's final accusation at the front door.
 
 const OLLAMA_URL := "http://127.0.0.1:11434/api/chat"
-const OLLAMA_MODEL := "llama3.2:3b"
+const OLLAMA_MODEL := "huihui_ai/llama3.2-abliterate:3b"
 const MAX_RESPONSE_TOKENS := 300 # hard safety cap - the prompt aims well under this so it's rarely hit mid-sentence
 const SUMMARY_MAX_TOKENS := 260 # three labeled sections need a bit more room
 
