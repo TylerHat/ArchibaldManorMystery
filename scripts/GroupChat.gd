@@ -55,6 +55,7 @@ var _queue: Array = [] # ids still owed a turn this round
 var _speaking_id: String = "" # whose turn is currently in flight ("" if none)
 var _round_start: int = 0 # rotates each round so the same suspect doesn't always open
 var _direct_round: bool = false # this round was aimed at one named suspect
+var _last_player_line: String = "" # what the detective last said aloud, for transcript entries
 var _gm: Node = null
 
 
@@ -81,6 +82,7 @@ func start(ids: Array) -> void:
 	_speaking_id = ""
 	_round_start = 0
 	_direct_round = false
+	_last_player_line = ""
 	active = true
 
 	_prime_attendees()
@@ -230,6 +232,7 @@ func submit_player_line(raw: String, direct_id: String = "") -> void:
 		roster_changed.emit()
 
 	_add_line("", text, "say")
+	_last_player_line = text
 	# Everyone present hears the detective, including anyone who won't reply
 	# this round - being silenced doesn't make you deaf.
 	var heard := "[In the hall] The detective says to the room: \"%s\"" % text
@@ -293,7 +296,13 @@ func _next_turn() -> void:
 
 	_speaking_id = id
 	turn_started.emit(id)
-	_gm.ask_group_member(id, _build_turn_prompt(id))
+	# Witnesses are everyone else in the room right now, muted or not - being
+	# told to keep quiet doesn't stop you being a witness to what was said.
+	var witnesses := []
+	for other in attendees:
+		if other != id:
+			witnesses.append(other)
+	_gm.ask_group_member(id, _build_turn_prompt(id), _last_player_line, witnesses)
 
 
 func _build_turn_prompt(id: String) -> String:

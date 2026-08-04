@@ -1735,10 +1735,18 @@ func _on_group_round_failed(message: String) -> void:
 	group_status_label.text = "Error: " + message
 
 
+## Writes one recorded exchange into the open one-on-one log. Lines this
+## suspect gave during a Hall meetup are replayed here too - it's one
+## continuous record for them - but marked, since the question above them was
+## put to the whole room rather than to them privately.
 func _append_transcript_entry(entry: Dictionary) -> void:
 	var c := GameManager.get_character(entry["character_id"])
 	var speaker_color: Color = NPC_COLORS.get(entry["character_id"], Color(1, 0.82, 0.5))
-	dialogue_log.append_text("[b]You:[/b] %s\n" % _colorize_names(String(entry["question"])))
+	if String(entry.get("scene", "")) == "group":
+		dialogue_log.append_text("[i][color=#9aa0a6]in the hall[/color][/i]\n")
+	var question := String(entry["question"])
+	if question != "":
+		dialogue_log.append_text("[b]You:[/b] %s\n" % _colorize_names(question))
 	dialogue_log.append_text("[b][color=#%s]%s:[/color][/b] %s\n\n" % [speaker_color.to_html(false), String(c.get("short", "")), _colorize_names(String(entry["answer"]))])
 
 
@@ -1824,7 +1832,7 @@ func toggle_notes() -> void:
 		# Default to whichever suspect was showing last time, unless you
 		# haven't talked to them (or anyone) - then pick the first suspect
 		# with any conversation.
-		if notes_selected_char == "" or GameManager.get_transcript_for(notes_selected_char).is_empty():
+		if notes_selected_char == "" or not GameManager.has_notes(notes_selected_char):
 			notes_selected_char = _first_interviewed_character()
 		_select_notes_character(notes_selected_char)
 		player.set_mouse_captured(false)
@@ -1834,7 +1842,7 @@ func toggle_notes() -> void:
 
 func _first_interviewed_character() -> String:
 	for c in GameManager.active_characters():
-		if not GameManager.get_transcript_for(c["id"]).is_empty():
+		if GameManager.has_notes(c["id"]):
 			return c["id"]
 	return ""
 
@@ -1860,7 +1868,7 @@ func _select_notes_character(id: String) -> void:
 func _update_notes_tab_styles() -> void:
 	for id in notes_tab_buttons.keys():
 		var btn: Button = notes_tab_buttons[id]
-		var talked: bool = not GameManager.get_transcript_for(id).is_empty()
+		var talked: bool = GameManager.has_notes(id)
 		btn.modulate = Color(1, 1, 1, 1.0) if talked else Color(1, 1, 1, 0.4)
 
 		if id == notes_selected_char:
@@ -1921,9 +1929,9 @@ func _on_summary_error(character_id: String, _message: String) -> void:
 
 
 ## Renders the right-hand pane for one suspect: their Timeline / Motive /
-## Slipups sections, a "Summarizing..." placeholder while one's in flight,
-## or a raw Q&A fallback if no summary is available (nothing asked yet, or
-## the last summarization attempt failed).
+## Slipups / Contradictions sections, a "Summarizing..." placeholder while one's
+## in flight, or a raw transcript fallback if no summary is available (nothing
+## asked yet, or the last summarization attempt failed).
 func _render_notes_content(id: String) -> void:
 	notes_log.clear()
 	if id == "":
@@ -1934,7 +1942,9 @@ func _render_notes_content(id: String) -> void:
 	var name_color: Color = NPC_COLORS.get(id, Color.WHITE)
 	notes_log.append_text("[b][color=#%s]%s[/color][/b] [color=#999999](%s)[/color]\n\n" % [name_color.to_html(false), String(c.get("name", "")), String(c.get("job", ""))])
 
-	var entries: Array = GameManager.get_transcript_for(id)
+	# Sources, not just their own answers: a suspect who stood silently through
+	# a Hall confrontation still has notes worth reading.
+	var entries: Array = GameManager.summary_sources(id)
 	if entries.is_empty():
 		notes_log.append_text("You haven't asked %s anything yet." % String(c.get("short", "them")))
 		return
@@ -1945,14 +1955,22 @@ func _render_notes_content(id: String) -> void:
 
 	var summary: Dictionary = GameManager.get_summary(id)
 	if summary.is_empty():
-		# No structured summary available - fall back to this suspect's raw Q&A.
+		# No structured summary available - fall back to the raw record.
 		for e in entries:
-			notes_log.append_text("Q: %s\nA: %s\n\n" % [_colorize_names(String(e["question"])), _colorize_names(String(e["answer"]))])
+			var answer := _colorize_names(String(e["answer"]))
+			if String(e["character_id"]) != id:
+				var other := GameManager.get_character(String(e["character_id"]))
+				notes_log.append_text("[i]In the hall, %s said:[/i] %s\n\n" % [String(other.get("short", "someone")), answer])
+			elif String(e.get("scene", "")) == "group":
+				notes_log.append_text("[i]In the hall[/i]\nQ: %s\nA: %s\n\n" % [_colorize_names(String(e["question"])), answer])
+			else:
+				notes_log.append_text("Q: %s\nA: %s\n\n" % [_colorize_names(String(e["question"])), answer])
 		return
 
 	notes_log.append_text("[b][color=#8fd3ff]TIMELINE[/color][/b]\n%s\n\n" % _colorize_names(_section_or_placeholder(summary.get("timeline", ""))))
 	notes_log.append_text("[b][color=#ffb37a]POTENTIAL REASON TO KILL[/color][/b]\n%s\n\n" % _colorize_names(_section_or_placeholder(summary.get("motive", ""))))
 	notes_log.append_text("[b][color=#ff8f8f]SLIPUPS[/color][/b]\n%s\n\n" % _colorize_names(_section_or_placeholder(summary.get("slipups", ""))))
+	notes_log.append_text("[b][color=#ffd166]CONTRADICTIONS[/color][/b]\n%s\n\n" % _colorize_names(_section_or_placeholder(summary.get("contradictions", ""))))
 
 
 func _section_or_placeholder(text: String) -> String:

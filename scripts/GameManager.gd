@@ -7,7 +7,7 @@ extends Node
 const OLLAMA_URL := "http://127.0.0.1:11434/api/chat"
 const OLLAMA_MODEL := "huihui_ai/llama3.2-abliterate:3b"
 const MAX_RESPONSE_TOKENS := 300 # hard safety cap - the prompt aims well under this so it's rarely hit mid-sentence
-const SUMMARY_MAX_TOKENS := 260 # three labeled sections need a bit more room
+const SUMMARY_MAX_TOKENS := 340 # four labeled sections need a bit more room
 # Group-scene lines are capped much harder than one-on-one answers: a Hall
 # meetup costs one sequential request PER attendee for every line the
 # detective says, so per-reply length is the entire latency budget. Short,
@@ -131,7 +131,15 @@ var group_chat: Node = null
 var murderer_id: String = ""
 var murder_weapon: String = ""
 var murder_time: String = ""
-var transcript: Array = [] # [{character_id, question, answer}]
+
+## Every line a suspect has given the detective, in the order it happened.
+## Entries are {character_id, question, answer}; lines spoken during a Hall
+## meetup add two more keys:
+##   "scene": "group"   - said out loud in front of other suspects
+##   "heard_by": [ids]  - who else was in the room at the time
+## One-on-one entries simply omit both, so anything reading this array can
+## treat a missing "scene" as a private interview.
+var transcript: Array = []
 
 # Which of the 8 CHARACTERS are actually in the mansion this game, chosen on
 # the pre-game selection screen. Defaults to all 8 if start_new_game() is
@@ -315,8 +323,11 @@ func note_to_character(id: String, text: String) -> void:
 ## Asks one attendee of a Hall meetup for their line. `prompt` is the fully
 ## built turn prompt from GroupChat; it's appended to that character's normal
 ## history so a group scene and a private interview are one continuous memory
-## for them. Response arrives via group_response / group_error.
-func ask_group_member(id: String, prompt: String) -> void:
+## for them. `player_line` is whatever the detective last said to the room and
+## `witnesses` is everyone else present - both are carried through to the
+## transcript entry so the case notes can tell a public claim from a private
+## one. Response arrives via group_response / group_error.
+func ask_group_member(id: String, prompt: String, player_line: String = "", witnesses: Array = []) -> void:
 	if not _histories.has(id):
 		group_error.emit(id, "That suspect isn't part of this game.")
 		return
@@ -327,7 +338,13 @@ func ask_group_member(id: String, prompt: String) -> void:
 		"stream": false,
 		"options": {"num_predict": GROUP_MAX_TOKENS, "temperature": 0.85},
 	}
-	_enqueue({"kind": "group", "character_id": id, "body": body})
+	_enqueue({
+		"kind": "group",
+		"character_id": id,
+		"player_line": player_line,
+		"witnesses": witnesses.duplicate(),
+		"body": body,
+	})
 
 
 ## Strips a "Marcus:" / "Marcus Sterling:" / "**Marcus**:" style speaker label
@@ -367,10 +384,45 @@ func get_transcript_for(character_id: String) -> Array:
 	return out
 
 
-## True if this character has been talked to since their case-notes summary
-## was last generated (or has never been summarized at all).
+## How many transcript entries feed this suspect's case notes: their own lines,
+## plus anything another suspect said out loud in front of them. The second
+## part matters because hearing someone else's account in the Hall can put this
+## suspect in contradiction without them saying another word - so their notes
+## need refreshing when it happens.
+func summary_source_count(character_id: String) -> int:
+	var count := 0
+	for e in transcript:
+		if e["character_id"] == character_id:
+			count += 1
+		elif String(e.get("scene", "")) == "group" and Array(e.get("heard_by", [])).has(character_id):
+			count += 1
+	return count
+
+
+## Everything relevant to one suspect's case notes, in the order it happened -
+## their own answers, and the other guests' Hall lines they were standing
+## there for.
+func summary_sources(character_id: String) -> Array:
+	var out := []
+	for e in transcript:
+		if e["character_id"] == character_id:
+			out.append(e)
+		elif String(e.get("scene", "")) == "group" and Array(e.get("heard_by", [])).has(character_id):
+			out.append(e)
+	return out
+
+
+## True if there's anything at all in this suspect's case file - their own
+## answers, or something they stood and listened to in the Hall.
+func has_notes(character_id: String) -> bool:
+	return summary_source_count(character_id) > 0
+
+
+## True if this character's notes are out of date - either they've said
+## something since the last summary, or they've heard something new said about
+## them in the Hall.
 func needs_summary_refresh(character_id: String) -> bool:
-	var count := get_transcript_for(character_id).size()
+	var count := summary_source_count(character_id)
 	if count == 0:
 		return false
 	return count > int(_summarized_at.get(character_id, 0))
@@ -384,30 +436,35 @@ func get_summary(character_id: String) -> Dictionary:
 	return _summaries.get(character_id, {})
 
 
-## Ask the model to distill everything a suspect has said so far into three
-## labeled case-notes sections - Timeline, Motive, and Slipups - separate
-## from that suspect's own in-character roleplay memory, so it doesn't
+## Ask the model to distill everything a suspect has said so far into four
+## labeled case-notes sections - Timeline, Motive, Slipups and Contradictions -
+## separate from that suspect's own in-character roleplay memory, so it doesn't
 ## pollute what they "remember" saying. Arrives via summary_ready / summary_error.
 func request_summary(character_id: String) -> void:
-	var entries := get_transcript_for(character_id)
+	var entries := summary_sources(character_id)
 	if entries.is_empty():
 		return
 	var c := get_character(character_id)
 	if c.is_empty():
 		return
 
-	var convo := ""
-	for e in entries:
-		convo += "Detective: %s\n%s: %s\n\n" % [e["question"], c["short"], e["answer"]]
+	var convo := _build_summary_transcript(character_id, entries)
 
 	var sys_prompt := ""
 	sys_prompt += "You are a detective's case-notes assistant in a murder-mystery game called Archibald Manor. "
-	sys_prompt += "Below is the full interview transcript so far between the detective and a suspect named %s (%s). " % [c["name"], c["job"]]
-	sys_prompt += "Organize what this suspect has revealed into exactly three sections. Respond using EXACTLY this "
-	sys_prompt += "format and these three markers, in this order, with nothing before, between, or after them:\n\n"
+	sys_prompt += "Below is the full record so far for a suspect named %s (%s). " % [c["name"], c["job"]]
+	sys_prompt += "Lines marked 'Detective:' are private questions and the lines under them are %s's own answers. " % String(c["short"])
+	sys_prompt += "Lines marked '[In the hall...]' were spoken out loud in front of the other guests named there. "
+	sys_prompt += "Lines marked '[In the hall, overheard]' were said by a DIFFERENT guest while %s was standing there listening - " % String(c["short"])
+	sys_prompt += "those are not %s's own words, but %s heard them.\n\n" % [String(c["short"]), String(c["short"])]
+	sys_prompt += "Organize this into exactly four sections. Respond using EXACTLY this "
+	sys_prompt += "format and these four markers, in this order, with nothing before, between, or after them:\n\n"
 	sys_prompt += "##TIMELINE##\n- their claimed whereabouts/alibi/account of events around the time of the murder\n"
 	sys_prompt += "##MOTIVE##\n- any possible reason they might have had to kill the victim - grudges, money, secrets, relationships\n"
-	sys_prompt += "##SLIPUPS##\n- anything suspicious, evasive, defensive, inconsistent, or contradictory in how they answered\n\n"
+	sys_prompt += "##SLIPUPS##\n- anything suspicious, evasive, defensive, or inconsistent in how they answered\n"
+	sys_prompt += "##CONTRADICTIONS##\n- specific points where this suspect's account conflicts with something ANOTHER guest "
+	sys_prompt += "said in front of them, or where their public story in the hall differs from what they said privately. "
+	sys_prompt += "Name the other guest and both versions.\n\n"
 	sys_prompt += "Under each marker, write 1-3 short bullet points starting with '- '. If a section has nothing "
 	sys_prompt += "relevant yet, write a single bullet '- Nothing notable yet.' under that marker instead of leaving "
 	sys_prompt += "it blank. Be objective and third-person. Completely ignore small talk and pleasantries."
@@ -424,12 +481,74 @@ func request_summary(character_id: String) -> void:
 	_enqueue({"kind": "summary", "character_id": character_id, "entry_count": entries.size(), "body": body})
 
 
+## Renders the transcript that gets summarized for one suspect. Three shapes
+## of line, deliberately distinguishable:
+##
+##   Detective: ...              a private question
+##   Marcus: ...                 the subject's own answer
+##   [In the hall, in front of Evelyn and Eleanor]
+##   Marcus: ...                 the subject speaking publicly
+##   [In the hall] Eleanor: ...  another guest, with the subject listening
+##
+## Where a claim was made is evidence in itself: a story told privately and
+## then told differently in front of witnesses is exactly the contradiction the
+## detective is hunting for, and the summarizer can only catch it if the two
+## are told apart. The last shape is what makes cross-suspect contradictions
+## findable at all - without it, each suspect is summarized in isolation and
+## nothing can ever disagree.
+func _build_summary_transcript(character_id: String, entries: Array) -> String:
+	var subject := get_character(character_id)
+	var subject_short := String(subject.get("short", "They"))
+	var convo := ""
+	var last_question := ""
+
+	for e in entries:
+		var is_group := String(e.get("scene", "")) == "group"
+		var speaker_id := String(e["character_id"])
+		var question := String(e.get("question", ""))
+
+		if speaker_id == character_id:
+			if is_group:
+				var witnesses := _name_list(Array(e.get("heard_by", [])))
+				if question != "" and question != last_question:
+					convo += "Detective (to the room): %s\n" % question
+					last_question = question
+				convo += "[In the hall, in front of %s]\n%s: %s\n\n" % [witnesses, subject_short, e["answer"]]
+			else:
+				convo += "Detective: %s\n%s: %s\n\n" % [question, subject_short, e["answer"]]
+				last_question = question
+		else:
+			# Someone else talking in front of this suspect.
+			var other := get_character(speaker_id)
+			if question != "" and question != last_question:
+				convo += "Detective (to the room): %s\n" % question
+				last_question = question
+			convo += "[In the hall, overheard] %s: %s\n\n" % [String(other.get("short", "Someone")), e["answer"]]
+
+	return convo
+
+
+## "Evelyn and Eleanor" / "Evelyn, Marcus and Eleanor" - used for witness lists.
+func _name_list(ids: Array) -> String:
+	var names := []
+	for id in ids:
+		var c := get_character(id)
+		if not c.is_empty():
+			names.append(String(c["short"]))
+	if names.is_empty():
+		return "no one else"
+	if names.size() == 1:
+		return String(names[0])
+	var head: Array = names.slice(0, names.size() - 1)
+	return "%s and %s" % [", ".join(PackedStringArray(head)), String(names[names.size() - 1])]
+
+
 ## Splits a "##TIMELINE##...##MOTIVE##...##SLIPUPS##..." response into a
 ## Dictionary. Robust to the sections arriving in any order, and returns an
 ## empty Dictionary if none of the markers were found at all (caller falls
 ## back to raw Q&A in that case).
 func _parse_summary_sections(text: String) -> Dictionary:
-	var markers := [["##TIMELINE##", "timeline"], ["##MOTIVE##", "motive"], ["##SLIPUPS##", "slipups"]]
+	var markers := [["##TIMELINE##", "timeline"], ["##MOTIVE##", "motive"], ["##SLIPUPS##", "slipups"], ["##CONTRADICTIONS##", "contradictions"]]
 	var positions := []
 	for m in markers:
 		positions.append(text.find(m[0]))
@@ -540,6 +659,13 @@ func _on_request_completed(result: int, response_code: int, _headers: PackedStri
 		# Stored without the speaker prefix so their own memory of what they
 		# said matches what the room actually heard.
 		_histories[character_id].append({"role": "assistant", "content": spoken})
+		transcript.append({
+			"character_id": character_id,
+			"question": String(item.get("player_line", "")),
+			"answer": spoken,
+			"scene": "group",
+			"heard_by": item.get("witnesses", []),
+		})
 		group_response.emit(character_id, spoken)
 
 	_process_queue()
