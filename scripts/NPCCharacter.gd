@@ -39,6 +39,11 @@ var _main = null
 ## resumes exactly where it left off once the conversation ends.
 var _is_talking: bool = false
 
+## True while this NPC is an attendee of an open Hall meetup. Freezes movement
+## the same way _is_talking does, so nobody wanders off mid-confrontation while
+## the other three are answering.
+var _in_group_scene: bool = false
+
 
 func _ready() -> void:
 	add_to_group("npc_characters")
@@ -47,6 +52,8 @@ func _ready() -> void:
 
 
 func get_interact_prompt() -> String:
+	if _wants_group_scene():
+		return "Address the room"
 	var c := GameManager.get_character(character_id)
 	if c.is_empty():
 		return "Talk"
@@ -55,8 +62,40 @@ func get_interact_prompt() -> String:
 
 func interact() -> void:
 	var main = get_tree().get_first_node_in_group("main_controller")
-	if main:
+	if main == null:
+		return
+	if _wants_group_scene():
+		main.open_group_dialogue()
+	else:
 		main.open_dialogue(character_id)
+
+
+## True when looking at this NPC should open a group confrontation instead of a
+## private interview: this NPC is standing in the meetup room, and so are the
+## detective and at least one other suspect.
+func _wants_group_scene() -> bool:
+	if _main == null or not _main.has_method("can_open_group_scene"):
+		return false
+	if current_room != _main.MEETUP_ROOM:
+		return false
+	return _main.can_open_group_scene()
+
+
+## Freezes this NPC for the duration of a Hall meetup and turns them toward the
+## detective. Separate from set_talking() so ending a group scene can't
+## accidentally un-freeze someone who is also mid one-on-one.
+func set_group_scene(in_scene: bool, face_position: Vector3 = Vector3.INF) -> void:
+	_in_group_scene = in_scene
+	if in_scene:
+		velocity.x = 0.0
+		velocity.z = 0.0
+		_has_wander_target = false
+		_wander_wait = randf_range(WANDER_WAIT_MIN, WANDER_WAIT_MAX)
+		if face_position != Vector3.INF:
+			var to_player := face_position - global_position
+			to_player.y = 0.0
+			if to_player.length() > 0.05:
+				look_at(global_position + to_player.normalized(), Vector3.UP)
 
 
 ## Called by Main when the player opens or closes this NPC's dialogue panel.
@@ -90,9 +129,10 @@ func begin_travel(waypoints: Array, dest_room: String) -> void:
 	state = "moving"
 	_has_wander_target = false
 	# A "go to the library" order given during a conversation should take
-	# effect immediately, so an explicit travel command overrides the
-	# stand-still-while-talking hold.
+	# effect immediately, so an explicit travel command overrides both the
+	# stand-still-while-talking hold and the group-scene hold.
 	_is_talking = false
+	_in_group_scene = false
 
 
 func _physics_process(delta: float) -> void:
@@ -101,9 +141,10 @@ func _physics_process(delta: float) -> void:
 	else:
 		velocity.y = 0.0
 
-	# Frozen mid-conversation: hold position (gravity still applies) and skip
-	# wandering, pathing, and separation entirely.
-	if _is_talking:
+	# Frozen mid-conversation or standing in a group confrontation: hold
+	# position (gravity still applies) and skip wandering, pathing, and
+	# separation entirely.
+	if _is_talking or _in_group_scene:
 		velocity.x = 0.0
 		velocity.z = 0.0
 		move_and_slide()

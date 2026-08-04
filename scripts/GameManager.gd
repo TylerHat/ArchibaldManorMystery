@@ -8,6 +8,11 @@ const OLLAMA_URL := "http://127.0.0.1:11434/api/chat"
 const OLLAMA_MODEL := "huihui_ai/llama3.2-abliterate:3b"
 const MAX_RESPONSE_TOKENS := 300 # hard safety cap - the prompt aims well under this so it's rarely hit mid-sentence
 const SUMMARY_MAX_TOKENS := 260 # three labeled sections need a bit more room
+# Group-scene lines are capped much harder than one-on-one answers: a Hall
+# meetup costs one sequential request PER attendee for every line the
+# detective says, so per-reply length is the entire latency budget. Short,
+# sharp interruptions are better drama than paragraphs anyway.
+const GROUP_MAX_TOKENS := 90
 
 const VICTIM_NAME := "Lord Reginald Archibald"
 const MURDER_ROOM := "the Billiard Room"
@@ -116,6 +121,12 @@ signal ollama_response(character_id, text)
 signal ollama_error(character_id, message)
 signal summary_ready(character_id, text)
 signal summary_error(character_id, message)
+signal group_response(character_id, text)
+signal group_error(character_id, message)
+
+## Turn engine for Hall meetups (see Scripts/GroupChat.gd). Created as a child
+## in _ready() so it rides on the same request queue as everything else.
+var group_chat: Node = null
 
 var murderer_id: String = ""
 var murder_weapon: String = ""
@@ -149,6 +160,14 @@ func _ready() -> void:
 	_http.use_threads = true
 	add_child(_http)
 	_http.request_completed.connect(_on_request_completed)
+
+	group_chat = load("res://Scripts/GroupChat.gd").new()
+	group_chat.name = "GroupChat"
+	add_child(group_chat)
+	# Connected from this side rather than inside GroupChat._ready(), which runs
+	# before the GameManager autoload name is resolvable.
+	group_response.connect(group_chat._on_group_response)
+	group_error.connect(group_chat._on_group_error)
 
 
 func _setup_input_map() -> void:
@@ -197,6 +216,8 @@ func start_new_game(character_ids: Array = []) -> void:
 	_request_queue.clear()
 	_busy = false
 	_current_request = {}
+	if group_chat != null:
+		group_chat.stop()
 	for c in pool:
 		_histories[c["id"]] = [{"role": "system", "content": _build_system_prompt(c["id"])}]
 
@@ -279,6 +300,61 @@ func ask_character(id: String, question: String) -> void:
 		"options": {"num_predict": MAX_RESPONSE_TOKENS, "temperature": 0.8},
 	}
 	_enqueue({"kind": "dialogue", "character_id": id, "question": question, "body": body})
+
+
+## Adds something a character HEARD to their private memory without asking
+## them for a reply. Used by GroupChat so everyone standing in the Hall
+## remembers the whole confrontation - not just the lines they answered - and
+## can bring it up later in a one-on-one interrogation.
+func note_to_character(id: String, text: String) -> void:
+	if not _histories.has(id):
+		return
+	_histories[id].append({"role": "user", "content": text})
+
+
+## Asks one attendee of a Hall meetup for their line. `prompt` is the fully
+## built turn prompt from GroupChat; it's appended to that character's normal
+## history so a group scene and a private interview are one continuous memory
+## for them. Response arrives via group_response / group_error.
+func ask_group_member(id: String, prompt: String) -> void:
+	if not _histories.has(id):
+		group_error.emit(id, "That suspect isn't part of this game.")
+		return
+	_histories[id].append({"role": "user", "content": prompt})
+	var body := {
+		"model": OLLAMA_MODEL,
+		"messages": _histories[id],
+		"stream": false,
+		"options": {"num_predict": GROUP_MAX_TOKENS, "temperature": 0.85},
+	}
+	_enqueue({"kind": "group", "character_id": id, "body": body})
+
+
+## Strips a "Marcus:" / "Marcus Sterling:" / "**Marcus**:" style speaker label
+## off the front of a reply. Small models reliably prefix their own name in
+## multi-party scenes no matter how firmly the prompt asks them not to, and
+## the UI already prints the speaker itself.
+func _strip_speaker_prefix(text: String, id: String) -> String:
+	var c := get_character(id)
+	if c.is_empty():
+		return text
+	var candidates := [String(c["name"]), String(c["short"]), String(c["first_name"])]
+	var parts := String(c["name"]).replace('"', "").split(" ")
+	for p in parts:
+		candidates.append(String(p))
+
+	var out := text.strip_edges()
+	# Loop, because a stubborn model can produce '**Marcus Sterling:** Marcus:'.
+	for _pass in range(2):
+		var trimmed := out.lstrip("*_ \t")
+		for cand in candidates:
+			if cand.length() < 2:
+				continue
+			if trimmed.begins_with(cand + ":") or trimmed.begins_with(cand + "**:") or trimmed.begins_with(cand + ":**"):
+				var idx := trimmed.find(":")
+				out = trimmed.substr(idx + 1).lstrip("* \t").strip_edges()
+				break
+	return out
 
 
 ## All the Q&A transcript entries for one character, in the order they
@@ -408,6 +484,8 @@ func _emit_failure(item: Dictionary, message: String) -> void:
 		ollama_error.emit(character_id, message)
 	elif kind == "summary":
 		summary_error.emit(character_id, message)
+	elif kind == "group":
+		group_error.emit(character_id, message)
 
 
 func _on_request_completed(result: int, response_code: int, _headers: PackedStringArray, body: PackedByteArray) -> void:
@@ -453,6 +531,16 @@ func _on_request_completed(result: int, response_code: int, _headers: PackedStri
 		_summaries[character_id] = _parse_summary_sections(content)
 		_summarized_at[character_id] = int(item.get("entry_count", 0))
 		summary_ready.emit(character_id, content)
+	elif kind == "group":
+		var spoken := _strip_speaker_prefix(content, character_id)
+		if spoken == "":
+			_emit_failure(item, "That suspect said nothing usable. Try again.")
+			_process_queue()
+			return
+		# Stored without the speaker prefix so their own memory of what they
+		# said matches what the room actually heard.
+		_histories[character_id].append({"role": "assistant", "content": spoken})
+		group_response.emit(character_id, spoken)
 
 	_process_queue()
 

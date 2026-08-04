@@ -80,6 +80,16 @@ var dialogue_ask_button: Button
 var dialogue_status_label: Label
 var current_dialogue_character: String = ""
 
+# Hall meetup panel - the group confrontation. The turn logic itself lives in
+# GameManager.group_chat (Scripts/GroupChat.gd); everything here is UI.
+var group_panel: Panel
+var group_roster: HBoxContainer
+var group_log: RichTextLabel
+var group_input: LineEdit
+var group_say_button: Button
+var group_status_label: Label
+var group_frozen_ids: Array = [] # attendees currently held still by the open scene
+
 var accusation_panel: Panel
 var accusation_suspect_buttons: Dictionary = {} # character_id -> Button
 var accusation_selected_id: String = ""
@@ -112,6 +122,11 @@ func _ready() -> void:
 	GameManager.ollama_error.connect(_on_ollama_error)
 	GameManager.summary_ready.connect(_on_summary_ready)
 	GameManager.summary_error.connect(_on_summary_error)
+
+	GameManager.group_chat.line_added.connect(_on_group_line_added)
+	GameManager.group_chat.turn_started.connect(_on_group_turn_started)
+	GameManager.group_chat.state_changed.connect(_on_group_state_changed)
+	GameManager.group_chat.round_failed.connect(_on_group_round_failed)
 
 	_build_room_name_lookup()
 	_build_move_command_regexes()
@@ -301,6 +316,9 @@ func _unhandled_input(event: InputEvent) -> void:
 		if dialogue_panel and dialogue_panel.visible:
 			close_dialogue()
 			get_viewport().set_input_as_handled()
+		elif group_panel and group_panel.visible:
+			close_group_dialogue()
+			get_viewport().set_input_as_handled()
 		elif accusation_panel and accusation_panel.visible:
 			close_accusation()
 			get_viewport().set_input_as_handled()
@@ -308,7 +326,7 @@ func _unhandled_input(event: InputEvent) -> void:
 			toggle_notes()
 			get_viewport().set_input_as_handled()
 	elif event.is_action_pressed("toggle_notes"):
-		if not (dialogue_panel.visible or accusation_panel.visible):
+		if not (dialogue_panel.visible or group_panel.visible or accusation_panel.visible):
 			toggle_notes()
 	elif event.is_action_pressed("toggle_debug"):
 		toggle_debug()
@@ -681,6 +699,35 @@ func hall_attendees() -> Array:
 	return out
 
 
+## Which room a world-space point sits in, by nearest room center. The 3x3
+## grid is evenly spaced and every room is the same size, so nearest-center is
+## exactly equivalent to a cell lookup here, without duplicating the PITCH/CELL
+## arithmetic that _build_mansion() already owns.
+func _room_at(pos: Vector3) -> String:
+	var best := ""
+	var best_d := INF
+	for rname in room_centers.keys():
+		var c: Vector3 = room_centers[rname]
+		var d := Vector2(pos.x - c.x, pos.z - c.z).length_squared()
+		if d < best_d:
+			best_d = d
+			best = rname
+	return best
+
+
+## True when the interact key should open a group confrontation rather than a
+## private interview: the detective is standing in the Hall and at least two
+## suspects have actually arrived there. This is the "I must be there to engage
+## the conversation" rule - a meetup cannot be opened, and therefore cannot
+## produce a single line of dialogue, from anywhere else in the mansion.
+func can_open_group_scene() -> bool:
+	if not is_instance_valid(player):
+		return false
+	if _room_at(player.global_position) != MEETUP_ROOM:
+		return false
+	return hall_attendees().size() >= 2
+
+
 ## Sends an NPC walking toward `room_name`. Returns a status string Main uses
 ## to write a short acknowledgement into the dialogue log: "moving",
 ## "already_there", "already_heading", "hall_full" (the meetup room has hit
@@ -809,6 +856,7 @@ func _build_ui() -> void:
 	ui_layer.add_child(debug_label)
 
 	_build_dialogue_panel()
+	_build_group_panel()
 	_build_accusation_panel()
 	_build_notes_panel()
 	_build_win_panel()
@@ -864,6 +912,68 @@ func _build_dialogue_panel() -> void:
 	close_btn.text = "Close (Esc)"
 	close_btn.pressed.connect(close_dialogue)
 	vbox.add_child(close_btn)
+
+
+## The Hall meetup panel. Deliberately wider than the one-on-one panel: group
+## lines are short but there are several per round, and each is prefixed with
+## a speaker name, so the log needs the extra room to stay readable.
+func _build_group_panel() -> void:
+	group_panel = Panel.new()
+	group_panel.set_anchors_preset(Control.PRESET_CENTER)
+	group_panel.size = Vector2(720, 480)
+	group_panel.position = Vector2(-360, -240)
+	group_panel.visible = false
+	ui_layer.add_child(group_panel)
+
+	var vbox := VBoxContainer.new()
+	vbox.set_anchors_preset(Control.PRESET_FULL_RECT)
+	vbox.offset_left = 16
+	vbox.offset_top = 16
+	vbox.offset_right = -16
+	vbox.offset_bottom = -16
+	vbox.add_theme_constant_override("separation", 8)
+	group_panel.add_child(vbox)
+
+	var title := Label.new()
+	title.text = "The Hall"
+	title.add_theme_font_size_override("font_size", 22)
+	vbox.add_child(title)
+
+	# One name chip per attendee, in that suspect's own body color, so the log
+	# below reads against a visible cast list.
+	group_roster = HBoxContainer.new()
+	group_roster.add_theme_constant_override("separation", 14)
+	vbox.add_child(group_roster)
+
+	group_log = RichTextLabel.new()
+	group_log.custom_minimum_size = Vector2(0, 290)
+	group_log.bbcode_enabled = true
+	group_log.scroll_following = true
+	vbox.add_child(group_log)
+
+	group_status_label = Label.new()
+	group_status_label.text = ""
+	group_status_label.add_theme_color_override("font_color", Color(1, 0.8, 0.3))
+	vbox.add_child(group_status_label)
+
+	var hbox := HBoxContainer.new()
+	vbox.add_child(hbox)
+
+	group_input = LineEdit.new()
+	group_input.placeholder_text = "Say something to the room..."
+	group_input.custom_minimum_size = Vector2(580, 0)
+	group_input.text_submitted.connect(func(_t): _send_group_line())
+	hbox.add_child(group_input)
+
+	group_say_button = Button.new()
+	group_say_button.text = "Say"
+	group_say_button.pressed.connect(_send_group_line)
+	hbox.add_child(group_say_button)
+
+	var group_close_btn := Button.new()
+	group_close_btn.text = "Leave the room (Esc)"
+	group_close_btn.pressed.connect(close_group_dialogue)
+	vbox.add_child(group_close_btn)
 
 
 func _build_accusation_panel() -> void:
@@ -1278,6 +1388,130 @@ func _set_npc_talking(character_id: String, talking: bool) -> void:
 		npc.set_talking(true, player.global_position)
 	else:
 		npc.set_talking(talking)
+
+
+# ---------------------------------------------------------- hall meetup UI --
+
+## Opens a group confrontation with everyone standing in the Hall. Falls back
+## to a normal one-on-one if there's only one suspect in there.
+func open_group_dialogue() -> void:
+	if win_panel.visible:
+		return
+	var ids := hall_attendees()
+	if ids.size() < 2:
+		if ids.size() == 1:
+			open_dialogue(String(ids[0]))
+		return
+
+	close_dialogue()
+	_set_group_frozen(ids, true)
+
+	_rebuild_group_roster(ids)
+	group_log.clear()
+	group_status_label.text = ""
+	group_input.editable = true
+	group_say_button.disabled = false
+	group_panel.visible = true
+	player.set_mouse_captured(false)
+	group_input.grab_focus()
+
+	# Started last so the opening stage direction lands in an already-visible
+	# (and already-cleared) log.
+	GameManager.group_chat.start(ids)
+
+
+func close_group_dialogue() -> void:
+	GameManager.group_chat.stop()
+	group_panel.visible = false
+	_set_group_frozen(group_frozen_ids, false)
+	if is_instance_valid(player):
+		player.set_mouse_captured(true)
+
+
+## Holds every attendee still (facing the detective) for the duration of the
+## scene, or releases them. Tracks who was frozen so the release can't miss
+## someone who has since left the Hall.
+func _set_group_frozen(ids: Array, frozen: bool) -> void:
+	if frozen:
+		group_frozen_ids = ids.duplicate()
+	for id in ids:
+		if not npc_nodes.has(id):
+			continue
+		var npc = npc_nodes[id]
+		if not is_instance_valid(npc):
+			continue
+		if frozen and is_instance_valid(player):
+			npc.set_group_scene(true, player.global_position)
+		else:
+			npc.set_group_scene(false)
+	if not frozen:
+		group_frozen_ids.clear()
+
+
+func _rebuild_group_roster(ids: Array) -> void:
+	for child in group_roster.get_children():
+		child.queue_free()
+	for id in ids:
+		var c := GameManager.get_character(id)
+		var chip := Label.new()
+		chip.text = String(c.get("short", ""))
+		chip.add_theme_font_size_override("font_size", 16)
+		chip.add_theme_color_override("font_color", NPC_COLORS.get(id, Color.WHITE))
+		group_roster.add_child(chip)
+
+
+func _send_group_line() -> void:
+	var text := group_input.text.strip_edges()
+	if text == "" or not group_panel.visible:
+		return
+	group_input.text = ""
+	GameManager.group_chat.submit_player_line(text)
+
+
+## The four handlers below all null-check group_panel because GroupChat lives on
+## the GameManager autoload and outlives the scene: a "Play Again" reload
+## reconnects these signals in _ready(), well before _build_ui() has created the
+## panel, and start_new_game() can emit state_changed in that window.
+func _on_group_line_added(entry: Dictionary) -> void:
+	if group_panel == null or not group_panel.visible:
+		return
+	var speaker_id := String(entry["speaker_id"])
+	var text := _colorize_names(String(entry["text"]))
+	if String(entry["kind"]) == "stage":
+		group_log.append_text("[i]%s[/i]\n\n" % text)
+	elif speaker_id == "":
+		group_log.append_text("[b]You:[/b] %s\n\n" % text)
+	else:
+		var c := GameManager.get_character(speaker_id)
+		var col: Color = NPC_COLORS.get(speaker_id, Color(1, 0.82, 0.5))
+		group_log.append_text("[b][color=#%s]%s:[/color][/b] %s\n\n" % [col.to_html(false), String(c.get("short", "")), text])
+
+
+func _on_group_turn_started(character_id: String) -> void:
+	if group_panel == null or not group_panel.visible:
+		return
+	var c := GameManager.get_character(character_id)
+	group_status_label.text = "%s is thinking..." % String(c.get("short", ""))
+
+
+## The engine only accepts a new line while it's "awaiting_player", so the
+## input box mirrors that exactly - no way to queue a second question on top of
+## a round that's still resolving.
+func _on_group_state_changed(new_state: String) -> void:
+	if group_panel == null or not group_panel.visible:
+		return
+	var ready_for_input := new_state == "awaiting_player"
+	group_input.editable = ready_for_input
+	group_say_button.disabled = not ready_for_input
+	if ready_for_input:
+		group_status_label.text = ""
+		group_input.grab_focus()
+
+
+func _on_group_round_failed(message: String) -> void:
+	if group_panel == null or not group_panel.visible:
+		return
+	group_status_label.text = "Error: " + message
 
 
 func _append_transcript_entry(entry: Dictionary) -> void:
