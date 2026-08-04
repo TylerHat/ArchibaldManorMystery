@@ -36,14 +36,25 @@ signal turn_started(character_id)
 ## speakers are dropped and control returns to the detective.
 signal round_failed(message)
 
+## Emitted when the guest list or the mute list changes, so the UI can redraw
+## the roster.
+signal roster_changed()
+
 var active: bool = false
 var attendees: Array = [] # character_ids, snapshotted when the scene opens
 var scene_log: Array = [] # [{speaker_id, text, kind}]
 var state: String = "idle" # idle | awaiting_player | responding
 
+## Suspects the detective has told to keep quiet. Only muted ids are present -
+## absence means "free to speak". A muted suspect still HEARS everything (see
+## note_to_character calls below), which is the whole point: letting someone
+## stew through two rounds and then giving them the floor is a real move.
+var muted: Dictionary = {} # character_id -> true
+
 var _queue: Array = [] # ids still owed a turn this round
 var _speaking_id: String = "" # whose turn is currently in flight ("" if none)
 var _round_start: int = 0 # rotates each round so the same suspect doesn't always open
+var _direct_round: bool = false # this round was aimed at one named suspect
 var _gm: Node = null
 
 
@@ -65,9 +76,11 @@ func start(ids: Array) -> void:
 		stop()
 	attendees = ids.duplicate()
 	scene_log.clear()
+	muted.clear()
 	_queue.clear()
 	_speaking_id = ""
 	_round_start = 0
+	_direct_round = false
 	active = true
 
 	_prime_attendees()
@@ -81,8 +94,10 @@ func start(ids: Array) -> void:
 func stop() -> void:
 	active = false
 	attendees.clear()
+	muted.clear()
 	_queue.clear()
 	_speaking_id = ""
+	_direct_round = false
 	_set_state("idle")
 
 
@@ -106,39 +121,151 @@ func _prime_attendees() -> void:
 		_gm.note_to_character(id, text)
 
 
+# --------------------------------------------------------- floor control --
+# Who is allowed to speak. None of these send anything to the model - they only
+# change who the next round will call on, and drop a stage direction into the
+# log. Main drives them from both typed commands and the roster buttons, so the
+# two are always equivalent.
+
+func is_muted(id: String) -> bool:
+	return muted.has(id)
+
+
+## The attendees currently free to answer, in seating order.
+func speakers() -> Array:
+	var out := []
+	for id in attendees:
+		if not muted.has(id):
+			out.append(id)
+	return out
+
+
+## Silences or un-silences one suspect. `announce` is false when the caller is
+## about to log something better itself - e.g. "Marcus, go ahead" reads fine as
+## the detective's line followed by Marcus answering, without a redundant
+## "Marcus is free to speak again." in between.
+func set_muted(id: String, silent: bool, announce: bool = true) -> void:
+	if not active or not attendees.has(id):
+		return
+	if silent == muted.has(id):
+		return
+	var short := _short_name(id)
+	if silent:
+		muted[id] = true
+		if announce:
+			_add_line("", "%s falls silent." % short, "stage")
+	else:
+		muted.erase(id)
+		if announce:
+			_add_line("", "%s is free to speak again." % short, "stage")
+	roster_changed.emit()
+
+
+## Silences the whole room, optionally leaving one suspect the floor.
+func silence_all(except_id: String = "") -> void:
+	if not active:
+		return
+	muted.clear()
+	for id in attendees:
+		if id != except_id:
+			muted[id] = true
+	if except_id != "" and attendees.has(except_id):
+		_add_line("", "The room goes quiet - only %s may speak." % _short_name(except_id), "stage")
+	else:
+		_add_line("", "The room falls silent.", "stage")
+	roster_changed.emit()
+
+
+func allow_all() -> void:
+	if not active:
+		return
+	muted.clear()
+	_add_line("", "You let the room speak freely again.", "stage")
+	roster_changed.emit()
+
+
+## Removes a suspect from the confrontation. Main handles actually walking them
+## out of the Hall; this just drops them from the guest list. Returns false if
+## they weren't an attendee.
+func dismiss(id: String) -> bool:
+	if not active or not attendees.has(id):
+		return false
+	attendees.erase(id)
+	muted.erase(id)
+	_queue.erase(id)
+	if _round_start >= attendees.size():
+		_round_start = 0
+	_add_line("", "%s leaves the hall." % _short_name(id), "stage")
+	roster_changed.emit()
+	return true
+
+
+## Echoes an order the detective typed (mute, dismiss, ...) into the log so
+## they can see what they typed. Logged as "command" rather than "say" so it
+## never reaches the model - these are stage directions to the player, not
+## things the suspects need to reason about.
+func log_player_command(text: String) -> void:
+	_add_line("", text, "command")
+
+
 # ---------------------------------------------------------------- the turn --
 
 ## The detective says something to the room. This is the only entry point that
 ## can start a round of replies.
-func submit_player_line(raw: String) -> void:
+##
+## If `direct_id` is set, only that suspect answers this round - and being
+## addressed by name un-mutes them, since telling someone to shut up and then
+## asking them a direct question should obviously get an answer.
+func submit_player_line(raw: String, direct_id: String = "") -> void:
 	if not active or state != "awaiting_player":
 		return
 	var text := raw.strip_edges()
 	if text == "":
 		return
 
+	if direct_id != "" and not attendees.has(direct_id):
+		direct_id = ""
+	if direct_id != "" and muted.has(direct_id):
+		muted.erase(direct_id)
+		roster_changed.emit()
+
 	_add_line("", text, "say")
 	# Everyone present hears the detective, including anyone who won't reply
-	# this round.
+	# this round - being silenced doesn't make you deaf.
+	var heard := "[In the hall] The detective says to the room: \"%s\"" % text
+	if direct_id != "":
+		heard = "[In the hall] The detective says to %s: \"%s\"" % [_speaker_label(direct_id), text]
 	for id in attendees:
-		_gm.note_to_character(id, "[In the hall] The detective says to the room: \"%s\"" % text)
+		_gm.note_to_character(id, heard)
 
-	_begin_round()
+	_begin_round(direct_id)
 
 
-## Builds this round's speaking order: every attendee once, rotated by one
-## each round so the same suspect isn't always first to answer (whoever
+## Builds this round's speaking order: every un-muted attendee once, rotated by
+## one each round so the same suspect isn't always first to answer (whoever
 ## speaks first shapes the whole round, so a fixed order would quietly make
-## one suspect the room's spokesperson).
-func _begin_round() -> void:
+## one suspect the room's spokesperson). A direct address collapses the round
+## to the one suspect who was named.
+func _begin_round(direct_id: String = "") -> void:
 	_queue.clear()
-	var n := attendees.size()
-	if n == 0:
+	_direct_round = direct_id != ""
+
+	if _direct_round:
+		_queue.append(direct_id)
+	else:
+		var n := attendees.size()
+		if n > 0:
+			for i in range(n):
+				var id := String(attendees[(_round_start + i) % n])
+				if not muted.has(id):
+					_queue.append(id)
+			_round_start = (_round_start + 1) % n
+
+	if _queue.is_empty():
+		_add_line("", "No one answers - you've told them all to keep quiet.", "stage")
 		_set_state("awaiting_player")
 		return
-	for i in range(n):
-		_queue.append(attendees[(_round_start + i) % n])
-	_round_start = (_round_start + 1) % n
+
 	_set_state("responding")
 	_next_turn()
 
@@ -148,13 +275,19 @@ func _next_turn() -> void:
 		return
 	if _queue.is_empty():
 		_speaking_id = ""
+		_direct_round = false
 		_set_state("awaiting_player")
 		return
 
 	var id := String(_queue.pop_front())
 	# A suspect who left the Hall (or was never valid) forfeits their turn
-	# rather than stalling the round.
+	# rather than stalling the round. Silencing someone mid-round takes effect
+	# immediately for the same reason - "be quiet" should mean now, not next
+	# time round. A direct address ignores the mute list by design.
 	if not attendees.has(id) or _gm.get_character(id).is_empty():
+		_next_turn()
+		return
+	if muted.has(id) and not _direct_round:
 		_next_turn()
 		return
 
@@ -219,6 +352,7 @@ func _on_group_error(character_id: String, message: String) -> void:
 	# Drop the rest of the round rather than firing the remaining requests into
 	# what is almost certainly the same failure, and hand control back.
 	_queue.clear()
+	_direct_round = false
 	_add_line("", "The room falls silent - something went wrong.", "stage")
 	_set_state("awaiting_player")
 	round_failed.emit(message)
@@ -237,6 +371,10 @@ func _set_state(new_state: String) -> void:
 		return
 	state = new_state
 	state_changed.emit(state)
+
+
+func _short_name(id: String) -> String:
+	return String(_gm.get_character(id).get("short", "They"))
 
 
 func _speaker_label(speaker_id: String) -> String:

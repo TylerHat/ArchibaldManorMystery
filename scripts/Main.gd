@@ -68,6 +68,16 @@ var room_name_lookup: Dictionary = {} # lowercase room name -> canonical room na
 var move_command_regex: RegEx = null
 var wait_command_regex: RegEx = null
 
+# Floor-control orders typed into the Hall meetup box - "Marcus, be quiet",
+# "everyone except Eleanor stay quiet", "Tom, you can go". Detected locally
+# the same way movement commands are, so an order to the room never costs an
+# Ollama round-trip and never gets answered in character.
+var group_silence_regex: RegEx = null
+var group_speak_regex: RegEx = null
+var group_leave_regex: RegEx = null
+var group_everyone_regex: RegEx = null
+var group_except_regex: RegEx = null
+
 var ui_layer: CanvasLayer
 var crosshair: ColorRect
 var prompt_label: Label
@@ -127,9 +137,11 @@ func _ready() -> void:
 	GameManager.group_chat.turn_started.connect(_on_group_turn_started)
 	GameManager.group_chat.state_changed.connect(_on_group_state_changed)
 	GameManager.group_chat.round_failed.connect(_on_group_round_failed)
+	GameManager.group_chat.roster_changed.connect(_on_group_roster_changed)
 
 	_build_room_name_lookup()
 	_build_move_command_regexes()
+	_build_group_command_regexes()
 
 	# The mouse may still be captured (MOUSE_MODE_CAPTURED) from a previous
 	# game if this is a "Play Again" scene reload - make sure it's free so
@@ -587,6 +599,123 @@ func _parse_move_command(text: String) -> String:
 	if m == null:
 		return ""
 	return String(room_name_lookup.get(m.get_string(1).to_lower(), ""))
+
+
+## Builds the five regexes behind the Hall meetup's floor-control orders. Kept
+## as separate intent patterns (silence / speak / leave / everyone / except)
+## rather than one big pattern per command, so the parser can combine them -
+## "everyone be quiet except Marcus" is the everyone pattern plus the silence
+## pattern plus the except pattern, with no dedicated rule of its own.
+func _build_group_command_regexes() -> void:
+	group_silence_regex = RegEx.new()
+	group_silence_regex.compile("(?i)\\b(?:be\\s+quiet|keep\\s+quiet|stay\\s+quiet|quiet\\s+down|say\\s+nothing|don't\\s+speak|do\\s+not\\s+speak|don't\\s+say|stop\\s+talking|hold\\s+your\\s+tongue|shut\\s+up|silence|silent)\\b")
+
+	group_speak_regex = RegEx.new()
+	group_speak_regex.compile("(?i)\\b(?:may\\s+speak|can\\s+speak|speak\\s+up|speak\\s+now|speak\\s+freely|go\\s+ahead|your\\s+turn|you\\s+may\\s+answer|answer\\s+me|say\\s+something|talk\\s+again|speak)\\b")
+
+	group_leave_regex = RegEx.new()
+	group_leave_regex.compile("(?i)\\b(?:leave|get\\s+out|step\\s+out|you\\s+can\\s+go|you\\s+may\\s+go|you're\\s+dismissed|dismissed|clear\\s+off|wait\\s+outside)\\b")
+
+	group_everyone_regex = RegEx.new()
+	group_everyone_regex.compile("(?i)\\b(?:everyone|everybody|all\\s+of\\s+you|the\\s+room|nobody|no\\s+one)\\b")
+
+	group_except_regex = RegEx.new()
+	group_except_regex.compile("(?i)\\b(?:except|apart\\s+from|other\\s+than|but)\\b\\s+(.+)$")
+
+
+## Classifies a line typed into the meetup box. Returns {"kind": ..., "id": ...}
+## where kind is one of:
+##   "none"               ordinary line to the room - everyone un-muted answers
+##   "address"            aimed at one named suspect - only they answer
+##   "mute" / "unmute"    floor control for one suspect
+##   "silence_all"        shut the whole room up
+##   "silence_all_except" shut everyone up but one
+##   "unmute_all"         let the room speak again
+##   "dismiss"            send a suspect out of the Hall
+func _parse_group_command(text: String) -> Dictionary:
+	var none := {"kind": "none", "id": ""}
+	if group_silence_regex == null:
+		return none
+
+	# A question is never an order, matching how _parse_move_command treats
+	# "Did you go to the kitchen?" as something to ask rather than something to
+	# do. Without this, "Marcus, why were you so quiet last night?" silences him
+	# instead of asking him. Note this only suppresses ORDERS - a question
+	# beginning with a name is still routed to that suspect below, since
+	# "Marcus, where were you?" is the single most common thing you'll type.
+	var is_order := text.find("?") == -1
+
+	# Room-wide orders are checked first: "everyone be quiet except Marcus"
+	# also starts with no suspect's name, so it would otherwise fall through to
+	# the name-prefix branch and be treated as an ordinary question.
+	if is_order and group_everyone_regex.search(text) != null:
+		# Silence is tested before speech because the silence phrasings contain
+		# the word "speak" ("don't speak", "do not speak") and would otherwise
+		# be read as permission to talk.
+		if group_silence_regex.search(text) != null:
+			var ex := group_except_regex.search(text)
+			if ex != null:
+				var ex_id := _find_attendee_in(ex.get_string(1))
+				if ex_id != "":
+					return {"kind": "silence_all_except", "id": ex_id}
+			return {"kind": "silence_all", "id": ""}
+		if group_speak_regex.search(text) != null:
+			return {"kind": "unmute_all", "id": ""}
+
+	# Everything else must be addressed to someone by name, at the START of the
+	# line. "Marcus, where were you?" is aimed at Marcus; "Where were you,
+	# Marcus?" is a question to the room that happens to mention him. Requiring
+	# the leading position keeps that distinction predictable instead of having
+	# any stray mention hijack the round.
+	var lead := _leading_attendee(text)
+	var id := String(lead["id"])
+	if id == "":
+		return none
+
+	if is_order:
+		var rest := text.substr(int(lead["end"])).strip_edges().lstrip(",:;-. \t")
+		if group_leave_regex.search(rest) != null:
+			return {"kind": "dismiss", "id": id}
+		if group_silence_regex.search(rest) != null:
+			return {"kind": "mute", "id": id}
+		if group_speak_regex.search(rest) != null:
+			return {"kind": "unmute", "id": id}
+	return {"kind": "address", "id": id}
+
+
+## The attendee whose name appears earliest in `text`, or "" if none do.
+func _find_attendee_in(text: String) -> String:
+	var best := ""
+	var best_pos := -1
+	for id in GameManager.group_chat.attendees:
+		if not name_regexes.has(id):
+			continue
+		var m: RegExMatch = name_regexes[id].search(text)
+		if m == null:
+			continue
+		if best_pos == -1 or m.get_start() < best_pos:
+			best_pos = m.get_start()
+			best = id
+	return best
+
+
+## The attendee named at the very start of `text`, as {"id", "end"} where end
+## is the character offset just past their name. Longest match wins, so
+## "Marcus Sterling, ..." consumes the surname too instead of leaving it in
+## the remainder and confusing the intent match.
+func _leading_attendee(text: String) -> Dictionary:
+	var best_id := ""
+	var best_end := 0
+	for id in GameManager.group_chat.attendees:
+		if not name_regexes.has(id):
+			continue
+		var m: RegExMatch = name_regexes[id].search(text)
+		if m == null or m.get_start() != 0:
+			continue
+		if m.get_end() > best_end:
+			best_end = m.get_end()
+			best_id = id
+	return {"id": best_id, "end": best_end}
 
 
 ## Shortest path (in room names, excluding `from_room`) between two rooms
@@ -1406,7 +1535,6 @@ func open_group_dialogue() -> void:
 	close_dialogue()
 	_set_group_frozen(ids, true)
 
-	_rebuild_group_roster(ids)
 	group_log.clear()
 	group_status_label.text = ""
 	group_input.editable = true
@@ -1415,9 +1543,10 @@ func open_group_dialogue() -> void:
 	player.set_mouse_captured(false)
 	group_input.grab_focus()
 
-	# Started last so the opening stage direction lands in an already-visible
-	# (and already-cleared) log.
+	# Started before the roster is drawn so the guest list and mute state the
+	# buttons read from are the session's, not the previous scene's leftovers.
 	GameManager.group_chat.start(ids)
+	_rebuild_group_roster(ids)
 
 
 func close_group_dialogue() -> void:
@@ -1448,24 +1577,111 @@ func _set_group_frozen(ids: Array, frozen: bool) -> void:
 		group_frozen_ids.clear()
 
 
+## One chip per attendee: their name in their own body color, plus a button
+## that silences or restores them. The button and the typed order ("Marcus, be
+## quiet") call exactly the same engine method, so the two can never disagree.
 func _rebuild_group_roster(ids: Array) -> void:
 	for child in group_roster.get_children():
+		group_roster.remove_child(child)
 		child.queue_free()
+
+	var gc = GameManager.group_chat
 	for id in ids:
 		var c := GameManager.get_character(id)
+		var silent: bool = gc.is_muted(id)
+
+		var col := VBoxContainer.new()
+		col.add_theme_constant_override("separation", 2)
+		group_roster.add_child(col)
+
 		var chip := Label.new()
 		chip.text = String(c.get("short", ""))
+		chip.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		chip.add_theme_font_size_override("font_size", 16)
-		chip.add_theme_color_override("font_color", NPC_COLORS.get(id, Color.WHITE))
-		group_roster.add_child(chip)
+		var name_col: Color = NPC_COLORS.get(id, Color.WHITE)
+		if silent:
+			name_col = name_col.darkened(0.45)
+		chip.add_theme_color_override("font_color", name_col)
+		col.add_child(chip)
+
+		var btn := Button.new()
+		btn.text = "Let speak" if silent else "Silence"
+		btn.custom_minimum_size = Vector2(96, 0)
+		btn.add_theme_font_size_override("font_size", 12)
+		btn.pressed.connect(_toggle_attendee_muted.bind(id))
+		col.add_child(btn)
+
+
+## Roster button handler. Un-silencing from the button only clears the mute -
+## it doesn't hand them the floor, because unlike typing "Marcus, go ahead"
+## there's no accompanying line from the detective for them to answer.
+func _toggle_attendee_muted(id: String) -> void:
+	var gc = GameManager.group_chat
+	gc.set_muted(id, not gc.is_muted(id))
+
+
+func _on_group_roster_changed() -> void:
+	if group_panel == null or not group_panel.visible:
+		return
+	_rebuild_group_roster(GameManager.group_chat.attendees)
+
+
+## Sends the suspect back to their own room and drops them from the scene.
+func _dismiss_attendee(id: String) -> void:
+	if not GameManager.group_chat.dismiss(id):
+		return
+	group_frozen_ids.erase(id)
+	if npc_nodes.has(id) and is_instance_valid(npc_nodes[id]):
+		npc_nodes[id].set_group_scene(false)
+	var home := String(GameManager.get_character(id).get("room", ""))
+	if home != "" and home != MEETUP_ROOM:
+		command_npc_move(id, home)
 
 
 func _send_group_line() -> void:
+	if group_panel == null or not group_panel.visible:
+		return
 	var text := group_input.text.strip_edges()
-	if text == "" or not group_panel.visible:
+	if text == "":
+		return
+	var gc = GameManager.group_chat
+	# Orders and questions alike are refused mid-round; the input box is
+	# already disabled then, but Enter can still fire through it.
+	if gc.state != "awaiting_player":
 		return
 	group_input.text = ""
-	GameManager.group_chat.submit_player_line(text)
+
+	var cmd := _parse_group_command(text)
+	var kind := String(cmd["kind"])
+	var id := String(cmd["id"])
+
+	match kind:
+		"silence_all":
+			gc.log_player_command(text)
+			gc.silence_all()
+		"silence_all_except":
+			gc.log_player_command(text)
+			gc.silence_all(id)
+		"unmute_all":
+			gc.log_player_command(text)
+			gc.allow_all()
+		"mute":
+			gc.log_player_command(text)
+			gc.set_muted(id, true)
+		"dismiss":
+			gc.log_player_command(text)
+			_dismiss_attendee(id)
+		"unmute":
+			# Restoring someone by name also gives them the floor - "Marcus, go
+			# ahead" plainly expects Marcus to say something, not just to
+			# rejoin the rotation for next time. Announce is suppressed since
+			# his answer follows immediately.
+			gc.set_muted(id, false, false)
+			gc.submit_player_line(text, id)
+		"address":
+			gc.submit_player_line(text, id)
+		_:
+			gc.submit_player_line(text)
 
 
 ## The four handlers below all null-check group_panel because GroupChat lives on
@@ -1477,8 +1693,13 @@ func _on_group_line_added(entry: Dictionary) -> void:
 		return
 	var speaker_id := String(entry["speaker_id"])
 	var text := _colorize_names(String(entry["text"]))
-	if String(entry["kind"]) == "stage":
+	var kind := String(entry["kind"])
+	if kind == "stage":
 		group_log.append_text("[i]%s[/i]\n\n" % text)
+	elif kind == "command":
+		# An order to the room, not a line of dialogue - dimmed so it reads as
+		# something you did rather than something you said.
+		group_log.append_text("[b]You:[/b] [i][color=#9aa0a6]%s[/color][/i]\n" % text)
 	elif speaker_id == "":
 		group_log.append_text("[b]You:[/b] %s\n\n" % text)
 	else:
