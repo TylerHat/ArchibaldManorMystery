@@ -11,6 +11,13 @@ const WALL_H := 3.0
 const WALL_T := 0.4
 const DOOR_W := 3.0
 
+# The Hall doubles as the meetup room: suspects ordered there gather for a
+# group confrontation. Capped because every attendee costs one sequential
+# Ollama call per line the detective says, and because a confrontation with
+# more than four voices stops being readable.
+const MEETUP_ROOM := "Hall"
+const MAX_HALL_ATTENDEES := 4
+
 # 3x3 layout. Hall (front door + player spawn) sits at the front-center so
 # the front door can face the exterior.
 const GRID := [
@@ -636,15 +643,58 @@ func get_room_travel_waypoints(from_room: String, to_room: String) -> Array:
 	return waypoints
 
 
+# ------------------------------------------------------------- hall meetup --
+# Suspects are gathered for a group confrontation one at a time, by telling
+# each of them "go to the hall" during a normal one-on-one conversation.
+# MAX_HALL_ATTENDEES caps how many will agree to crowd in there.
+
+## How many suspects currently count against the Hall's capacity. Deliberately
+## counts NPCs still walking there as well as those already standing in it -
+## begin_travel() sets current_room to the destination immediately, so an NPC
+## sent to the Hall occupies a slot from the moment they're ordered. Without
+## this you could order six suspects to the Hall in a row (each one passing the
+## capacity check while the previous ones are still in the corridors) and end
+## up with all six arriving.
+func hall_occupancy() -> int:
+	var count := 0
+	for id in npc_nodes.keys():
+		var npc = npc_nodes[id]
+		if is_instance_valid(npc) and npc.current_room == MEETUP_ROOM:
+			count += 1
+	return count
+
+
+## The suspects actually standing in the Hall right now - arrived, not still
+## en route. This is the guest list for a group confrontation, so it excludes
+## anyone still walking (state == "moving"); hall_occupancy() is the one that
+## counts those. Returned in stable CHARACTERS order rather than spawn or
+## arrival order, matching active_characters().
+func hall_attendees() -> Array:
+	var out := []
+	for c in GameManager.active_characters():
+		var id: String = c["id"]
+		if not npc_nodes.has(id):
+			continue
+		var npc = npc_nodes[id]
+		if is_instance_valid(npc) and npc.current_room == MEETUP_ROOM and npc.state != "moving":
+			out.append(id)
+	return out
+
+
 ## Sends an NPC walking toward `room_name`. Returns a status string Main uses
 ## to write a short acknowledgement into the dialogue log: "moving",
-## "already_there", "already_heading", or "invalid" (unknown character/room).
+## "already_there", "already_heading", "hall_full" (the meetup room has hit
+## MAX_HALL_ATTENDEES), or "invalid" (unknown character/room).
 func command_npc_move(character_id: String, room_name: String) -> String:
 	if not npc_nodes.has(character_id) or not room_centers.has(room_name):
 		return "invalid"
 	var npc = npc_nodes[character_id]
 	if npc.current_room == room_name:
 		return "already_heading" if npc.state == "moving" else "already_there"
+	# Checked after the already-there cases above, so an NPC who is themselves
+	# in the Hall is never blocked by their own occupancy slot.
+	if room_name == MEETUP_ROOM and hall_occupancy() >= MAX_HALL_ATTENDEES:
+		return "hall_full"
 	var waypoints := get_room_travel_waypoints(npc.current_room, room_name)
 	if waypoints.is_empty():
 		return "invalid"
@@ -667,6 +717,8 @@ func _handle_move_command(character_id: String, room_name: String, original_text
 			ack = "%s is already in the %s." % [short, room_name]
 		"already_heading":
 			ack = "%s is already on the way to the %s." % [short, room_name]
+		"hall_full":
+			ack = "%s glances toward the hall. \"There's a crowd in there already - I'll wait my turn.\"" % short
 		_:
 			ack = "%s doesn't seem able to get there." % short
 	dialogue_log.append_text("[b]You:[/b] %s\n" % _colorize_names(original_text))
