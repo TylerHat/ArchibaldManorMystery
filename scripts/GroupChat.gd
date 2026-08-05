@@ -40,6 +40,11 @@ signal round_failed(message)
 ## the roster.
 signal roster_changed()
 
+## Emitted when the confrontation stops being a confrontation - `remaining` is
+## how many suspects are left. 1 means it has quietly become a private
+## conversation; 0 means there's no one left to talk to.
+signal quorum_lost(remaining)
+
 var active: bool = false
 var attendees: Array = [] # character_ids, snapshotted when the scene opens
 var scene_log: Array = [] # [{speaker_id, text, kind}]
@@ -57,6 +62,15 @@ var _round_start: int = 0 # rotates each round so the same suspect doesn't alway
 var _direct_round: bool = false # this round was aimed at one named suspect
 var _last_player_line: String = "" # what the detective last said aloud, for transcript entries
 var _gm: Node = null
+
+## Every request gets a unique token; only a reply carrying the token we're
+## currently waiting on is accepted. Requests already in Ollama's queue can't
+## be cancelled, so this is how a reply from a closed scene - or from a suspect
+## who has since been sent out of the room - gets dropped. GameManager still
+## records it into that suspect's memory and the transcript either way; it just
+## never reaches the room.
+var _next_token: int = 0
+var _pending_token: int = -1 # -1 means "not waiting on anything"
 
 
 func _ready() -> void:
@@ -83,12 +97,14 @@ func start(ids: Array) -> void:
 	_round_start = 0
 	_direct_round = false
 	_last_player_line = ""
+	_pending_token = -1
 	active = true
 
 	_prime_attendees()
 
 	var names := _display_names(attendees)
 	_add_line("", "%s are gathered in the hall, waiting for you to speak." % _join_names(names), "stage")
+	_add_line("", "Speak to the room, or start with a name to address one of them. \"Marcus, be quiet\" silences someone; \"Marcus, go ahead\" gives them the floor.", "stage")
 	_set_state("awaiting_player")
 
 
@@ -100,6 +116,8 @@ func stop() -> void:
 	_queue.clear()
 	_speaking_id = ""
 	_direct_round = false
+	# Anything still in flight belongs to a scene that no longer exists.
+	_pending_token = -1
 	_set_state("idle")
 
 
@@ -199,7 +217,30 @@ func dismiss(id: String) -> bool:
 		_round_start = 0
 	_add_line("", "%s leaves the hall." % _short_name(id), "stage")
 	roster_changed.emit()
+
+	# Sending someone out while the room is waiting on their answer: discard
+	# that answer and carry on down the queue, rather than having a line
+	# arrive from someone who has already walked out.
+	if _speaking_id == id:
+		_speaking_id = ""
+		_pending_token = -1
+		_next_turn()
+
+	_check_quorum()
 	return true
+
+
+## A confrontation needs at least two people to confront each other. Dropping
+## below that isn't an error - it just quietly stops being a group scene, and
+## the detective should be told rather than left wondering why nobody argues.
+func _check_quorum() -> void:
+	if not active or attendees.size() >= 2:
+		return
+	if attendees.size() == 1:
+		_add_line("", "Only %s is left in the hall - you're speaking privately now." % _short_name(String(attendees[0])), "stage")
+	else:
+		_add_line("", "The hall is empty.", "stage")
+	quorum_lost.emit(attendees.size())
 
 
 ## Echoes an order the detective typed (mute, dismiss, ...) into the log so
@@ -302,7 +343,9 @@ func _next_turn() -> void:
 	for other in attendees:
 		if other != id:
 			witnesses.append(other)
-	_gm.ask_group_member(id, _build_turn_prompt(id), _last_player_line, witnesses)
+	_next_token += 1
+	_pending_token = _next_token
+	_gm.ask_group_member(id, _build_turn_prompt(id), _last_player_line, witnesses, _pending_token)
 
 
 func _build_turn_prompt(id: String) -> String:
@@ -338,9 +381,10 @@ func _recent_spoken_lines() -> Array:
 # ------------------------------------------------------ response handling --
 # Connected to GameManager.group_response / group_error from GameManager._ready().
 
-func _on_group_response(character_id: String, text: String) -> void:
-	if not active or character_id != _speaking_id:
+func _on_group_response(character_id: String, text: String, token: int) -> void:
+	if not active or token != _pending_token or character_id != _speaking_id:
 		return
+	_pending_token = -1
 	_speaking_id = ""
 	_add_line(character_id, text, "say")
 
@@ -354,9 +398,10 @@ func _on_group_response(character_id: String, text: String) -> void:
 	_next_turn()
 
 
-func _on_group_error(character_id: String, message: String) -> void:
-	if not active or character_id != _speaking_id:
+func _on_group_error(character_id: String, message: String, token: int) -> void:
+	if not active or token != _pending_token or character_id != _speaking_id:
 		return
+	_pending_token = -1
 	_speaking_id = ""
 	# Drop the rest of the round rather than firing the remaining requests into
 	# what is almost certainly the same failure, and hand control back.

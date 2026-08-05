@@ -138,6 +138,7 @@ func _ready() -> void:
 	GameManager.group_chat.state_changed.connect(_on_group_state_changed)
 	GameManager.group_chat.round_failed.connect(_on_group_round_failed)
 	GameManager.group_chat.roster_changed.connect(_on_group_roster_changed)
+	GameManager.group_chat.quorum_lost.connect(_on_group_quorum_lost)
 
 	_build_room_name_lookup()
 	_build_move_command_regexes()
@@ -1477,6 +1478,10 @@ func hide_prompt() -> void:
 func open_dialogue(character_id: String) -> void:
 	if win_panel.visible:
 		return
+	# Taking one suspect aside ends the confrontation - the others go back to
+	# wandering rather than standing frozen in the hall unattended.
+	if group_panel != null and group_panel.visible:
+		close_group_dialogue()
 	# If some other suspect was somehow still held, release them first.
 	_set_npc_talking(current_dialogue_character, false)
 	current_dialogue_character = character_id
@@ -1624,6 +1629,18 @@ func _on_group_roster_changed() -> void:
 	if group_panel == null or not group_panel.visible:
 		return
 	_rebuild_group_roster(GameManager.group_chat.attendees)
+
+
+## Everyone left the hall, or all but one did. With nobody left there's nothing
+## to talk to, so the panel closes. With one left the panel keeps working -
+## it's just a private conversation held in a wider window now, and closing it
+## out from under a half-finished exchange would be more disruptive than
+## leaving it open.
+func _on_group_quorum_lost(remaining: int) -> void:
+	if group_panel == null or not group_panel.visible:
+		return
+	if remaining <= 0:
+		close_group_dialogue()
 
 
 ## Sends the suspect back to their own room and drops them from the scene.
@@ -1794,6 +1811,12 @@ func _on_ollama_error(character_id: String, message: String) -> void:
 
 func open_accusation() -> void:
 	close_dialogue()
+	# The front door can't be reached with the meetup panel open (the mouse is
+	# released, which disables interaction), but leaving a live confrontation
+	# running behind the accusation screen would strand frozen suspects if that
+	# ever changes.
+	if group_panel != null and group_panel.visible:
+		close_group_dialogue()
 	accusation_result_label.text = ""
 	accusation_selected_id = ""
 	accusation_accuse_button.disabled = true

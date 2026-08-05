@@ -121,8 +121,12 @@ signal ollama_response(character_id, text)
 signal ollama_error(character_id, message)
 signal summary_ready(character_id, text)
 signal summary_error(character_id, message)
-signal group_response(character_id, text)
-signal group_error(character_id, message)
+# Group signals carry the token GroupChat tagged the request with, so a reply
+# that arrives after its scene was closed (or after the turn moved on) can be
+# recognised as stale and dropped instead of being spoken by someone who has
+# left the room.
+signal group_response(character_id, text, token)
+signal group_error(character_id, message, token)
 
 ## Turn engine for Hall meetups (see Scripts/GroupChat.gd). Created as a child
 ## in _ready() so it rides on the same request queue as everything else.
@@ -327,9 +331,9 @@ func note_to_character(id: String, text: String) -> void:
 ## `witnesses` is everyone else present - both are carried through to the
 ## transcript entry so the case notes can tell a public claim from a private
 ## one. Response arrives via group_response / group_error.
-func ask_group_member(id: String, prompt: String, player_line: String = "", witnesses: Array = []) -> void:
+func ask_group_member(id: String, prompt: String, player_line: String = "", witnesses: Array = [], token: int = 0) -> void:
 	if not _histories.has(id):
-		group_error.emit(id, "That suspect isn't part of this game.")
+		group_error.emit(id, "That suspect isn't part of this game.", token)
 		return
 	_histories[id].append({"role": "user", "content": prompt})
 	var body := {
@@ -343,6 +347,7 @@ func ask_group_member(id: String, prompt: String, player_line: String = "", witn
 		"character_id": id,
 		"player_line": player_line,
 		"witnesses": witnesses.duplicate(),
+		"token": token,
 		"body": body,
 	})
 
@@ -604,7 +609,7 @@ func _emit_failure(item: Dictionary, message: String) -> void:
 	elif kind == "summary":
 		summary_error.emit(character_id, message)
 	elif kind == "group":
-		group_error.emit(character_id, message)
+		group_error.emit(character_id, message, int(item.get("token", 0)))
 
 
 func _on_request_completed(result: int, response_code: int, _headers: PackedStringArray, body: PackedByteArray) -> void:
@@ -666,7 +671,7 @@ func _on_request_completed(result: int, response_code: int, _headers: PackedStri
 			"scene": "group",
 			"heard_by": item.get("witnesses", []),
 		})
-		group_response.emit(character_id, spoken)
+		group_response.emit(character_id, spoken, int(item.get("token", 0)))
 
 	_process_queue()
 

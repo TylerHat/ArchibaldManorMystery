@@ -44,15 +44,27 @@ view/UI stretch to fill whatever size you resize it to (no black bars).
   - whether it's the person you're talking to, or someone else they
   mention - it's colored to match that suspect's body color in the
   mansion, so you can immediately tell who's who while you read.
+- **Telling a suspect where to go** - type a movement instruction instead of
+  a question in any conversation ("go to the library", "wait in the study")
+  and they'll walk there through the mansion's doorways. This is handled
+  locally, so it costs no thinking time and they don't answer it in
+  character - you just get a short acknowledgement.
+- **Hall meetups** - send suspects to the Hall one at a time and they'll
+  gather there (up to 4; a fifth will refuse in character). Walk into the
+  Hall yourself with two or more of them present and the interact prompt
+  changes to **Address the room**. See "Confronting them together" below.
 - **Tab** - open/close your case notes. Each suspect gets their own tab
   down the left side; click one to see their notes on the right, organized
-  into three sections:
+  into four sections:
   - **Timeline** - their claimed whereabouts/alibi around the time of the
 	murder
   - **Potential Reason to Kill** - any motive that's come up (grudges,
     money, secrets, relationships)
-  - **Slipups** - anything suspicious, evasive, defensive, or contradictory
+  - **Slipups** - anything suspicious, evasive, defensive, or inconsistent
     in how they answered
+  - **Contradictions** - points where their account conflicts with what
+    another guest said in front of them in the Hall, or where their public
+    story differs from what they told you privately
 
   This is AI-generated from that suspect's interview, filtering out small
   talk. Summaries are generated lazily, per tab: clicking a suspect's tab
@@ -90,9 +102,10 @@ view/UI stretch to fill whatever size you resize it to (no black bars).
 - Every question you type is sent to a local `llama3.2:3b` model via
   Ollama, along with that character's personality, job, and a system prompt
   describing the case. Each character remembers your prior conversation
-  with *them specifically* (so you can follow up and press them), but
-  characters don't hear what you asked other suspects - only you do, via
-  your Tab case notes.
+  with *them specifically* (so you can follow up and press them). In a
+  private interview they don't hear what you asked anyone else - only you
+  do, via your Tab case notes. The Hall is the exception: anything said
+  there is heard by everyone standing in the room.
 - One suspect is secretly the murderer each game. Their prompt tells them
   to lie and stay composed, but also tells them they're not a professional
   liar - if you press hard, contradict them, or come back to the same
@@ -102,6 +115,48 @@ view/UI stretch to fill whatever size you resize it to (no black bars).
   name, or nickname all work) and submit. Wrong guesses just let you keep
   investigating; the right guess ends the case and shows you the
   murderer's motive.
+
+## Confronting them together
+
+Interrogating suspects one at a time only ever gets you one side of a
+story. To catch someone in a lie you generally need the person who can
+contradict them standing in the same room.
+
+- **Gathering.** Tell suspects "go to the hall" in their own conversations,
+  one at a time. The Hall holds 4; a fifth will refuse rather than crowd in.
+- **Starting.** Walk into the Hall with at least two of them there and
+  interact. Nothing happens until *you* speak - they'll stand there
+  indefinitely otherwise.
+- **Taking turns.** Say something to the room and each un-silenced suspect
+  answers once, in turn, each hearing what the ones before them just said.
+  The order rotates every round so the same person isn't always first to
+  set the tone.
+- **Controlling the floor.** Start a line with a suspect's name to aim it at
+  them alone ("Marcus, where were you at 11:30?"). Type orders to manage the
+  room:
+
+  | Order | Effect |
+  |---|---|
+  | `Marcus, be quiet` | drops him from the rotation - he still hears everything |
+  | `Marcus, go ahead` | restores him and gives him the floor now |
+  | `Everyone be quiet except Marcus` | silences the room but one |
+  | `Everyone may speak` | clears the mute list |
+  | `Marcus, leave` | sends him back to his own room |
+
+  Each suspect also has a Silence / Let speak button above the log. Orders
+  are recognised locally, so they cost no thinking time and never get
+  answered in character. A line with a question mark in it is always treated
+  as a question, so "Marcus, why were you so quiet last night?" asks him
+  rather than silencing him.
+- **Why it works.** Innocent suspects are told to speak up when they hear
+  something they know to be false; the murderer is told that attention is
+  dangerous and that they may deflect it onto someone else. Letting someone
+  stew through two rounds and then giving them the floor is a real tactic -
+  they've heard everything said while they were silent.
+- **Afterwards.** Everything said in the Hall goes into your case notes,
+  tagged with who was standing there. That's what feeds the
+  **Contradictions** section: a story told privately and then told
+  differently in front of witnesses is exactly what you're hunting for.
 
 ## Design notes / assumptions
 
