@@ -39,6 +39,10 @@ signal roster_changed()
 ## conversation; 0 means there's no one left to talk to.
 signal quorum_lost(remaining)
 
+## How many of a suspect's own lines from the current scene get replayed into
+## their turn prompt so they don't contradict themselves mid-confrontation.
+const OWN_LINE_RECAP := 3
+
 var active: bool = false
 var attendees: Array = [] # character_ids, snapshotted when the scene opens
 var scene_log: Array = [] # [{speaker_id, text, kind}]
@@ -351,12 +355,55 @@ func _next_turn() -> void:
 func _build_turn_prompt(id: String) -> String:
 	var c: Dictionary = _gm.get_character(id)
 	var text := "[The hall is waiting for you to answer.]\n"
-	text += "You are %s. Say ONE short line out loud to the room - 1 to 2 sentences. " % String(c.get("name", ""))
+
+	# Their own earlier account, replayed here rather than left buried under
+	# everyone else's hall chatter. This is the difference between a suspect who
+	# holds their story under pressure and one who quietly drifts off it.
+	var recap: String = _gm.private_recap(id)
+	if recap != "":
+		text += "\nWhat you have already told the detective in private:\n"
+		text += recap
+
+	# And what they've said in THIS room, in this scene. Just as important:
+	# without it a suspect will cheerfully contradict a line they gave two
+	# turns ago, because by then it's several messages back behind three other
+	# people talking. Their own words are the last thing they should be losing
+	# track of.
+	var said: String = _own_recent_lines(id)
+	if said != "":
+		text += "\nWhat you have already said out loud in this room:\n"
+		text += said
+
+	if recap != "" or said != "":
+		text += "All of the above is your own account. Stay consistent with it - do not deny or "
+		text += "reword something you already said. If someone in this room contradicts it, challenge them.\n"
+
+	text += "\nYou are %s. Say ONE short line out loud to the room - 1 to 2 sentences. " % String(c.get("name", ""))
 	text += "Answer the detective, respond to what someone just said, disagree with them, "
 	text += "or call someone out if you believe they are lying. "
-	text += "Remember everything you have already told the detective in private - do not contradict yourself by accident. "
+	text += "Only refer to things you actually remember - if the detective describes an event you have "
+	text += "no memory of, say so plainly rather than playing along. "
 	text += "Do not narrate actions. Do not speak for anyone else. Do not write your own name before your line."
 	return text
+
+
+## This suspect's own spoken lines from the current scene, oldest first, capped
+## to the most recent few. Pulled from scene_log rather than the transcript
+## because it's already scene-scoped - what they said in a meetup an hour ago
+## isn't what they're at risk of contradicting right now.
+func _own_recent_lines(id: String) -> String:
+	var mine := []
+	for e in scene_log:
+		if e["kind"] == "say" and String(e["speaker_id"]) == id:
+			mine.append(String(e["text"]))
+	if mine.is_empty():
+		return ""
+	if mine.size() > OWN_LINE_RECAP:
+		mine = mine.slice(mine.size() - OWN_LINE_RECAP)
+	var out := ""
+	for line in mine:
+		out += "- %s\n" % line
+	return out
 
 
 # ------------------------------------------------------ response handling --

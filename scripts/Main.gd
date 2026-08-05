@@ -343,6 +343,9 @@ func _unhandled_input(event: InputEvent) -> void:
 			toggle_notes()
 	elif event.is_action_pressed("toggle_debug"):
 		toggle_debug()
+	elif event.is_action_pressed("toggle_prompt_dump"):
+		GameManager.debug_dump_group = not GameManager.debug_dump_group
+		print("[DEBUG] Group prompt dump %s - the next line spoken in a hall meetup will print its full payload." % ("ON" if GameManager.debug_dump_group else "OFF"))
 
 
 # ---------------------------------------------------------------- geometry --
@@ -964,7 +967,7 @@ func _build_ui() -> void:
 	ui_layer.add_child(prompt_label)
 
 	var help := Label.new()
-	help.text = "WASD move | Space jump | Mouse look | Click or E to interact | Tab case notes | F1 debug | Esc release mouse"
+	help.text = "WASD move | Space jump | Mouse look | Click or E to interact | Tab case notes | F1 debug | F2 prompt dump | Esc release mouse"
 	help.set_anchors_preset(Control.PRESET_TOP_LEFT)
 	help.position = Vector2(16, 16)
 	help.add_theme_font_size_override("font_size", 14)

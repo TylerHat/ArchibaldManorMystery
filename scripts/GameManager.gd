@@ -25,6 +25,11 @@ const GROUP_MAX_TOKENS := 90
 # written into every other attendee's history.
 const OLLAMA_NUM_CTX := 8192
 
+# How much of a suspect's private interview gets replayed into their group-scene
+# turn prompt. See private_recap() for why this exists at all.
+const RECAP_MAX_ITEMS := 4
+const RECAP_MAX_CHARS := 160
+
 const VICTIM_NAME := "Lord Reginald Archibald"
 const MURDER_ROOM := "the Billiard Room"
 
@@ -143,6 +148,13 @@ signal group_error(character_id, message, token)
 ## in _ready() so it rides on the same request queue as everything else.
 var group_chat: Node = null
 
+## When true, every group-scene request prints the exact message list it's
+## sending to the Godot console. Toggled with F2 in-game. Worth reaching for
+## whenever a suspect seems to have forgotten something - it shows at a glance
+## whether the information is missing from the payload (a bug) or present but
+## buried far from the generation point (a prompting problem). Testing aid only.
+var debug_dump_group: bool = false
+
 var murderer_id: String = ""
 var murder_weapon: String = ""
 var murder_time: String = ""
@@ -202,6 +214,7 @@ func _setup_input_map() -> void:
 	_add_key_action("toggle_notes", KEY_TAB)
 	_add_key_action("jump", KEY_SPACE)
 	_add_key_action("toggle_debug", KEY_F1)
+	_add_key_action("toggle_prompt_dump", KEY_F2)
 
 
 func _add_key_action(action_name: String, keycode: int) -> void:
@@ -325,6 +338,54 @@ func ask_character(id: String, question: String) -> void:
 	_enqueue({"kind": "dialogue", "character_id": id, "question": question, "body": body})
 
 
+## A compact reminder of what this suspect has already told the detective in
+## private - their own answers only, newest last, one per line.
+##
+## Their full interview is already in their history and is sent with every
+## group request, so this is NOT about the model lacking the information. It's
+## about where the information sits. By the third round of a meetup the
+## interview is a dozen messages back, behind everyone else's chatter, and
+## generation is dominated by what's nearest - so the suspect drifts off the
+## story they gave you an hour ago without ever noticing. Replaying it at the
+## generation point costs ~80 tokens and puts their own account where the model
+## is actually looking.
+##
+## Group lines are excluded on purpose: those are already public, and the
+## interesting failure is a private story quietly diverging from a public one.
+func private_recap(character_id: String) -> String:
+	var answers := []
+	for e in transcript:
+		if String(e["character_id"]) != character_id:
+			continue
+		if String(e.get("scene", "")) == "group":
+			continue
+		answers.append(String(e["answer"]))
+	if answers.is_empty():
+		return ""
+	if answers.size() > RECAP_MAX_ITEMS:
+		answers = answers.slice(answers.size() - RECAP_MAX_ITEMS)
+
+	var out := ""
+	for a in answers:
+		out += "- %s\n" % _condense(String(a))
+	return out
+
+
+## Flattens an answer to a single line and clips it at a word boundary, so a
+## rambling reply doesn't cost as much as the rest of the turn prompt.
+func _condense(text: String) -> String:
+	var t := text.strip_edges().replace("\n", " ").replace("\r", " ")
+	while t.find("  ") != -1:
+		t = t.replace("  ", " ")
+	if t.length() <= RECAP_MAX_CHARS:
+		return t
+	var cut := t.substr(0, RECAP_MAX_CHARS)
+	var space := cut.rfind(" ")
+	if space > int(RECAP_MAX_CHARS / 2.0):
+		cut = cut.substr(0, space)
+	return cut + "..."
+
+
 ## Adds something a character HEARD to their private memory without asking
 ## them for a reply. Used by GroupChat so everyone standing in the Hall
 ## remembers the whole confrontation - not just the lines they answered - and
@@ -355,11 +416,18 @@ func ask_group_member(id: String, prompt: String, player_line: String = "", witn
 		return
 	var messages: Array = _histories[id].duplicate()
 	messages.append({"role": "user", "content": prompt})
+	if debug_dump_group:
+		_dump_group_payload(id, messages)
 	var body := {
 		"model": OLLAMA_MODEL,
 		"messages": messages,
 		"stream": false,
-		"options": {"num_predict": GROUP_MAX_TOKENS, "temperature": 0.85, "num_ctx": OLLAMA_NUM_CTX},
+		# Lower temperature than one-on-one dialogue on purpose. In a private
+		# interview a bit of variety makes a suspect feel alive; in a group
+		# scene the same variety reads as a character who can't keep their
+		# story straight, because every line is immediately checkable against
+		# what they said two turns ago in front of witnesses.
+		"options": {"num_predict": GROUP_MAX_TOKENS, "temperature": 0.6, "num_ctx": OLLAMA_NUM_CTX},
 	}
 	_enqueue({
 		"kind": "group",
@@ -369,6 +437,26 @@ func ask_group_member(id: String, prompt: String, player_line: String = "", witn
 		"token": token,
 		"body": body,
 	})
+
+
+## Prints one group request's full message list, with each message's distance
+## from the generation point - the number that actually matters when a suspect
+## seems to have forgotten something. Roughly 4 characters per token.
+func _dump_group_payload(id: String, messages: Array) -> void:
+	var c := get_character(id)
+	var total := 0
+	for msg in messages:
+		total += String(msg["content"]).length()
+
+	print("\n===== GROUP PROMPT -> %s =====" % String(c.get("name", id)))
+	print("%d messages, %d chars (~%d tokens), num_ctx=%d" % [messages.size(), total, int(total / 4.0), OLLAMA_NUM_CTX])
+	for i in range(messages.size()):
+		var msg: Dictionary = messages[i]
+		var content := String(msg["content"]).replace("\n", " | ")
+		if content.length() > 220:
+			content = content.substr(0, 220) + "..."
+		print("[%2d] (%2d back) %9s: %s" % [i, messages.size() - i, String(msg["role"]), content])
+	print("===== end =====\n")
 
 
 ## Strips a "Marcus:" / "Marcus Sterling:" / "**Marcus**:" style speaker label
