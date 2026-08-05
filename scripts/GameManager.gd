@@ -14,6 +14,17 @@ const SUMMARY_MAX_TOKENS := 340 # four labeled sections need a bit more room
 # sharp interruptions are better drama than paragraphs anyway.
 const GROUP_MAX_TOKENS := 90
 
+# How much conversation the model is allowed to keep in view. This MUST be set
+# explicitly: Ollama's default context is small (2048 on older builds, 4096 on
+# newer ones), and when a conversation outgrows it the oldest messages are
+# silently dropped. A suspect's private interview is the oldest thing in their
+# history after the system prompt, so it is the first thing evicted - which is
+# exactly the wrong thing to forget when you've hauled them into the hall to be
+# confronted with what they told you earlier. A group scene fills the window
+# several times faster than a private one, because every attendee's line is
+# written into every other attendee's history.
+const OLLAMA_NUM_CTX := 8192
+
 const VICTIM_NAME := "Lord Reginald Archibald"
 const MURDER_ROOM := "the Billiard Room"
 
@@ -309,7 +320,7 @@ func ask_character(id: String, question: String) -> void:
 		# question, which is the single biggest cause of multi-minute waits -
 		# far bigger than model size or CPU vs GPU. ~120 tokens is roughly a
 		# short paragraph, plenty for an in-character answer.
-		"options": {"num_predict": MAX_RESPONSE_TOKENS, "temperature": 0.8},
+		"options": {"num_predict": MAX_RESPONSE_TOKENS, "temperature": 0.8, "num_ctx": OLLAMA_NUM_CTX},
 	}
 	_enqueue({"kind": "dialogue", "character_id": id, "question": question, "body": body})
 
@@ -324,23 +335,31 @@ func note_to_character(id: String, text: String) -> void:
 	_histories[id].append({"role": "user", "content": text})
 
 
-## Asks one attendee of a Hall meetup for their line. `prompt` is the fully
-## built turn prompt from GroupChat; it's appended to that character's normal
-## history so a group scene and a private interview are one continuous memory
-## for them. `player_line` is whatever the detective last said to the room and
-## `witnesses` is everyone else present - both are carried through to the
-## transcript entry so the case notes can tell a public claim from a private
-## one. Response arrives via group_response / group_error.
+## Asks one attendee of a Hall meetup for their line. `player_line` is whatever
+## the detective last said to the room and `witnesses` is everyone else present
+## - both are carried through to the transcript entry so the case notes can
+## tell a public claim from a private one. Response arrives via
+## group_response / group_error.
+##
+## `prompt` is the turn instruction ("you're in a group scene, say one short
+## line") and is deliberately NOT stored in the character's history - it's
+## direction to the actor, not something the character said, heard, or should
+## remember. Persisting it once per turn per attendee used to bury the actual
+## conversation under repeated copies of the same instruction, crowding the
+## earlier private interview out of the context window. What the character
+## genuinely experienced is already in their history, written there by
+## note_to_character().
 func ask_group_member(id: String, prompt: String, player_line: String = "", witnesses: Array = [], token: int = 0) -> void:
 	if not _histories.has(id):
 		group_error.emit(id, "That suspect isn't part of this game.", token)
 		return
-	_histories[id].append({"role": "user", "content": prompt})
+	var messages: Array = _histories[id].duplicate()
+	messages.append({"role": "user", "content": prompt})
 	var body := {
 		"model": OLLAMA_MODEL,
-		"messages": _histories[id],
+		"messages": messages,
 		"stream": false,
-		"options": {"num_predict": GROUP_MAX_TOKENS, "temperature": 0.85},
+		"options": {"num_predict": GROUP_MAX_TOKENS, "temperature": 0.85, "num_ctx": OLLAMA_NUM_CTX},
 	}
 	_enqueue({
 		"kind": "group",
@@ -481,7 +500,7 @@ func request_summary(character_id: String) -> void:
 			{"role": "user", "content": convo},
 		],
 		"stream": false,
-		"options": {"num_predict": SUMMARY_MAX_TOKENS, "temperature": 0.4},
+		"options": {"num_predict": SUMMARY_MAX_TOKENS, "temperature": 0.4, "num_ctx": OLLAMA_NUM_CTX},
 	}
 	_enqueue({"kind": "summary", "character_id": character_id, "entry_count": entries.size(), "body": body})
 

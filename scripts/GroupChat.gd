@@ -12,12 +12,6 @@ extends Node
 # from submit_player_line(). Suspects can stand in the Hall indefinitely and
 # not a single token is generated until the detective says something.
 
-## How many of the most recent lines get replayed into a suspect's turn prompt
-## for immediate salience. The full scene is already in their private history
-## (see GameManager.note_to_character), so this is about what's freshest in
-## mind, not about what they know.
-const RECENT_CONTEXT_LINES := 4
-
 ## Emitted for every line that belongs in the on-screen log, whether it came
 ## from the detective, a suspect, or the engine itself (stage directions).
 ## `entry` is {speaker_id, text, kind}; speaker_id "" means the detective, and
@@ -348,34 +342,21 @@ func _next_turn() -> void:
 	_gm.ask_group_member(id, _build_turn_prompt(id), _last_player_line, witnesses, _pending_token)
 
 
+## The instruction handed to one attendee when it's their turn. Deliberately
+## short and content-free: what was just said in the room is already sitting in
+## their history as notes (see GameManager.note_to_character), immediately
+## before this, so repeating it here would both waste context and duplicate the
+## conversation. This prompt is ephemeral - GameManager sends it but never
+## stores it.
 func _build_turn_prompt(id: String) -> String:
 	var c: Dictionary = _gm.get_character(id)
-	var text := "[The hall is waiting for you.]\n"
-
-	var recent := _recent_spoken_lines()
-	if not recent.is_empty():
-		text += "Just said out loud:\n"
-		for e in recent:
-			text += "%s: %s\n" % [_speaker_label(e["speaker_id"]), e["text"]]
-		text += "\n"
-
+	var text := "[The hall is waiting for you to answer.]\n"
 	text += "You are %s. Say ONE short line out loud to the room - 1 to 2 sentences. " % String(c.get("name", ""))
 	text += "Answer the detective, respond to what someone just said, disagree with them, "
 	text += "or call someone out if you believe they are lying. "
+	text += "Remember everything you have already told the detective in private - do not contradict yourself by accident. "
 	text += "Do not narrate actions. Do not speak for anyone else. Do not write your own name before your line."
 	return text
-
-
-## The last few genuinely spoken lines, oldest first - stage directions are
-## skipped since they're UI flavor, not something anyone in the room heard.
-func _recent_spoken_lines() -> Array:
-	var spoken := []
-	for e in scene_log:
-		if e["kind"] == "say":
-			spoken.append(e)
-	if spoken.size() <= RECENT_CONTEXT_LINES:
-		return spoken
-	return spoken.slice(spoken.size() - RECENT_CONTEXT_LINES)
 
 
 # ------------------------------------------------------ response handling --
