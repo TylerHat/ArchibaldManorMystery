@@ -102,12 +102,17 @@ func start(ids: Array) -> void:
 
 	var names := _display_names(attendees)
 	_add_line("", "%s are gathered in the hall, waiting for you to speak." % _join_names(names), "stage")
-	_add_line("", "Speak to the room, or start with a name to address one of them. \"Marcus, be quiet\" silences someone; \"Marcus, go ahead\" gives them the floor.", "stage")
+	_add_line("", "Speak to the room, or start with a name to address one of them. \"Marcus, be quiet\" silences someone; \"Marcus, go ahead\" gives them the floor; \"Marcus, go to the library\" sends him there. \"Everyone, back to your rooms\" clears the hall.", "stage")
 	_set_state("awaiting_player")
 
 
 ## Ends the confrontation. Safe to call when no session is open.
 func stop() -> void:
+	# Close the scene out in everyone's memory before the guest list is thrown
+	# away - anyone still in the room needs telling that it's over.
+	if active:
+		for id in attendees:
+			_note_scene_ended(String(id))
 	active = false
 	attendees.clear()
 	muted.clear()
@@ -117,6 +122,27 @@ func stop() -> void:
 	# Anything still in flight belongs to a scene that no longer exists.
 	_pending_token = -1
 	_set_state("idle")
+
+
+## Closes the scene out in one suspect's memory: the room emptied, and from
+## here on they are alone with the detective.
+##
+## This matters more than it looks. Everything a suspect hears is stored with
+## role "user" - the detective's questions AND every other guest's line, since
+## there's no third role to put them in. So after a meetup their history reads
+## as one long stream of "user" messages in which the user has been speaking as
+## Eleanor, as Evelyn, and as the detective. Nothing marks where the scene
+## ended, so the next private question looks like more of the same and the
+## model starts addressing the detective by another guest's name. An explicit
+## end-of-scene marker is what breaks that.
+func _note_scene_ended(id: String) -> void:
+	if _gm == null:
+		return
+	var text := "[The gathering in the hall is over. The other guests have left and gone back to their own rooms. "
+	text += "You are alone with the detective again. Everything said to you from this point on is the detective "
+	text += "speaking to you privately - no other guest is present, and nothing you are told now comes from one of them. "
+	text += "Never address the detective by another guest's name, and do not reply to the other guests: they cannot hear you.]"
+	_gm.note_to_character(id, text)
 
 
 ## Appends the one-time group-scene instruction to each attendee's private
@@ -214,6 +240,7 @@ func dismiss(id: String) -> bool:
 	if _round_start >= attendees.size():
 		_round_start = 0
 	_add_line("", "%s leaves the hall." % _short_name(id), "stage")
+	_note_scene_ended(id)
 	roster_changed.emit()
 
 	# Sending someone out while the room is waiting on their answer: discard
@@ -226,6 +253,31 @@ func dismiss(id: String) -> bool:
 
 	_check_quorum()
 	return true
+
+
+## Ends the confrontation by sending everyone out at once. Returns the ids that
+## were dismissed so the caller can actually walk them out of the room - this
+## only clears the guest list. Done in one shot rather than by looping dismiss()
+## so the log reads as one exit rather than a countdown with a stray "only
+## Evelyn is left" in the middle of it.
+func dismiss_all() -> Array:
+	if not active:
+		return []
+	var leaving: Array = attendees.duplicate()
+	if leaving.is_empty():
+		return []
+	for id in leaving:
+		_note_scene_ended(String(id))
+	attendees.clear()
+	muted.clear()
+	_queue.clear()
+	_round_start = 0
+	_speaking_id = ""
+	_pending_token = -1
+	_add_line("", "The guests file out of the hall.", "stage")
+	roster_changed.emit()
+	quorum_lost.emit(0)
+	return leaving
 
 
 ## A confrontation needs at least two people to confront each other. Dropping
@@ -274,9 +326,12 @@ func submit_player_line(raw: String, direct_id: String = "") -> void:
 	_last_player_line = text
 	# Everyone present hears the detective, including anyone who won't reply
 	# this round - being silenced doesn't make you deaf.
-	var heard := "[In the hall] The detective says to the room: \"%s\"" % text
+	# "The detective" vs "Another guest" below is load-bearing: both end up
+	# stored under the same "user" role, so the wording is the only thing
+	# telling the model which of them is speaking.
+	var heard := "[In the hall] THE DETECTIVE says to the room: \"%s\"" % text
 	if direct_id != "":
-		heard = "[In the hall] The detective says to %s: \"%s\"" % [_speaker_label(direct_id), text]
+		heard = "[In the hall] THE DETECTIVE says to %s: \"%s\"" % [_speaker_label(direct_id), text]
 	for id in attendees:
 		_gm.note_to_character(id, heard)
 
@@ -375,8 +430,15 @@ func _build_turn_prompt(id: String) -> String:
 		text += said
 
 	if recap != "" or said != "":
-		text += "All of the above is your own account. Stay consistent with it - do not deny or "
-		text += "reword something you already said. If someone in this room contradicts it, challenge them.\n"
+		# Careful with this wording. An earlier version said "do not reword
+		# something you already said", which a small model reads as an
+		# instruction to repeat the line verbatim - and it did, word for word,
+		# turn after turn. Consistency has to be stated as "don't contradict",
+		# never as "don't rephrase", and it has to be paired with an explicit
+		# push to move forward.
+		text += "All of the above is your own account. Do not contradict any of it. "
+		text += "Do NOT repeat a line you have already said - say something new that moves the "
+		text += "conversation forward. If someone in this room contradicts your account, challenge them.\n"
 
 	text += "\nYou are %s. Say ONE short line out loud to the room - 1 to 2 sentences. " % String(c.get("name", ""))
 	text += "Answer the detective, respond to what someone just said, disagree with them, "
@@ -418,7 +480,7 @@ func _on_group_response(character_id: String, text: String, token: int) -> void:
 
 	# Everyone else in the room heard it, whether or not they reply this round.
 	var c: Dictionary = _gm.get_character(character_id)
-	var heard := "[In the hall] %s said out loud: \"%s\"" % [String(c.get("name", "")), text]
+	var heard := "[In the hall] ANOTHER GUEST, %s (not the detective), said out loud to the room: \"%s\"" % [String(c.get("name", "")), text]
 	for other in attendees:
 		if other != character_id:
 			_gm.note_to_character(other, heard)

@@ -617,8 +617,11 @@ func _build_group_command_regexes() -> void:
 	group_speak_regex = RegEx.new()
 	group_speak_regex.compile("(?i)\\b(?:may\\s+speak|can\\s+speak|speak\\s+up|speak\\s+now|speak\\s+freely|go\\s+ahead|your\\s+turn|you\\s+may\\s+answer|answer\\s+me|say\\s+something|talk\\s+again|speak)\\b")
 
+	# "Leave" also covers being sent home, since dismissal already walks a
+	# suspect back to their own starting room - "go back to your room" and
+	# "leave" want the same thing to happen.
 	group_leave_regex = RegEx.new()
-	group_leave_regex.compile("(?i)\\b(?:leave|get\\s+out|step\\s+out|you\\s+can\\s+go|you\\s+may\\s+go|you're\\s+dismissed|dismissed|clear\\s+off|wait\\s+outside)\\b")
+	group_leave_regex.compile("(?i)\\b(?:leave|get\\s+out|step\\s+out|you\\s+can\\s+go|you\\s+may\\s+go|you're\\s+dismissed|dismissed|clear\\s+off|wait\\s+outside|go\\s+home|(?:go\\s+|head\\s+)?back\\s+to\\s+(?:your|their|his|her)\\s+(?:own\\s+)?rooms?|return\\s+to\\s+(?:your|their|his|her)\\s+(?:own\\s+)?rooms?)\\b")
 
 	group_everyone_regex = RegEx.new()
 	group_everyone_regex.compile("(?i)\\b(?:everyone|everybody|all\\s+of\\s+you|the\\s+room|nobody|no\\s+one)\\b")
@@ -663,6 +666,10 @@ func _parse_group_command(text: String) -> Dictionary:
 				if ex_id != "":
 					return {"kind": "silence_all_except", "id": ex_id}
 			return {"kind": "silence_all", "id": ""}
+		# "Everyone, back to your rooms" - the one order you always need at the
+		# end of a confrontation, and the only way to clear the Hall in one go.
+		if group_leave_regex.search(text) != null:
+			return {"kind": "dismiss_all", "id": ""}
 		if group_speak_regex.search(text) != null:
 			return {"kind": "unmute_all", "id": ""}
 
@@ -674,17 +681,44 @@ func _parse_group_command(text: String) -> Dictionary:
 	var lead := _leading_attendee(text)
 	var id := String(lead["id"])
 	if id == "":
+		# No name at the front, but if the line mentions exactly one person in
+		# the room it's still aimed at them - "what about you, Tom?" obviously
+		# wants Tom, not a full round of everyone. Requiring the name to lead
+		# was too strict and made ordinary phrasing silently address the room.
+		# Two or more names stays room-wide, since "Marcus, is Tom lying?"
+		# genuinely is ambiguous about who should answer.
+		var named := _attendees_named_in(text)
+		if named.size() == 1:
+			return {"kind": "address", "id": String(named[0])}
 		return none
 
 	if is_order:
 		var rest := text.substr(int(lead["end"])).strip_edges().lstrip(",:;-. \t")
 		if group_leave_regex.search(rest) != null:
 			return {"kind": "dismiss", "id": id}
+		# "Marcus, go to the library" - the same movement command that works in
+		# a private conversation, which previously did nothing in here and got
+		# answered in character instead.
+		var room := _parse_move_command(rest)
+		if room != "" and room != MEETUP_ROOM:
+			return {"kind": "move", "id": id, "room": room}
 		if group_silence_regex.search(rest) != null:
 			return {"kind": "mute", "id": id}
 		if group_speak_regex.search(rest) != null:
 			return {"kind": "unmute", "id": id}
 	return {"kind": "address", "id": id}
+
+
+## Every attendee mentioned anywhere in `text`, in seating order. Used to work
+## out whether a line singles someone out.
+func _attendees_named_in(text: String) -> Array:
+	var out := []
+	for id in GameManager.group_chat.attendees:
+		if not name_regexes.has(id):
+			continue
+		if name_regexes[id].search(text) != null:
+			out.append(id)
+	return out
 
 
 ## The attendee whose name appears earliest in `text`, or "" if none do.
@@ -1614,10 +1648,28 @@ func _rebuild_group_roster(ids: Array) -> void:
 
 		var btn := Button.new()
 		btn.text = "Let speak" if silent else "Silence"
-		btn.custom_minimum_size = Vector2(96, 0)
+		btn.custom_minimum_size = Vector2(104, 0)
 		btn.add_theme_font_size_override("font_size", 12)
 		btn.pressed.connect(_toggle_attendee_muted.bind(id))
 		col.add_child(btn)
+
+		# Take one suspect aside. Without this the Hall is a trap: pressing E on
+		# anyone standing in it always opens the group panel, so once two
+		# suspects are gathered there's otherwise no route to a private
+		# conversation with either of them.
+		var alone_btn := Button.new()
+		alone_btn.text = "Speak alone"
+		alone_btn.custom_minimum_size = Vector2(104, 0)
+		alone_btn.add_theme_font_size_override("font_size", 12)
+		alone_btn.pressed.connect(open_dialogue.bind(id))
+		col.add_child(alone_btn)
+
+		var send_btn := Button.new()
+		send_btn.text = "Send home"
+		send_btn.custom_minimum_size = Vector2(104, 0)
+		send_btn.add_theme_font_size_override("font_size", 12)
+		send_btn.pressed.connect(_dismiss_attendee.bind(id))
+		col.add_child(send_btn)
 
 
 ## Roster button handler. Un-silencing from the button only clears the mute -
@@ -1646,16 +1698,39 @@ func _on_group_quorum_lost(remaining: int) -> void:
 		close_group_dialogue()
 
 
-## Sends the suspect back to their own room and drops them from the scene.
-func _dismiss_attendee(id: String) -> void:
-	if not GameManager.group_chat.dismiss(id):
-		return
+## Releases a suspect from the confrontation's freeze and walks them to
+## `room_name` - or to their own starting room if none is given.
+func _walk_attendee_out(id: String, room_name: String = "") -> void:
 	group_frozen_ids.erase(id)
 	if npc_nodes.has(id) and is_instance_valid(npc_nodes[id]):
 		npc_nodes[id].set_group_scene(false)
-	var home := String(GameManager.get_character(id).get("room", ""))
-	if home != "" and home != MEETUP_ROOM:
-		command_npc_move(id, home)
+	var dest := room_name
+	if dest == "":
+		dest = String(GameManager.get_character(id).get("room", ""))
+	if dest != "" and dest != MEETUP_ROOM:
+		command_npc_move(id, dest)
+
+
+## Sends one suspect back to their own room and drops them from the scene.
+func _dismiss_attendee(id: String) -> void:
+	if not GameManager.group_chat.dismiss(id):
+		return
+	_walk_attendee_out(id)
+
+
+## Drops one suspect from the scene and sends them to a room you named.
+func _move_attendee_out(id: String, room_name: String) -> void:
+	if not GameManager.group_chat.dismiss(id):
+		return
+	_walk_attendee_out(id, room_name)
+
+
+## Clears the whole Hall. Without this the only way out was dismissing each
+## suspect by name, and any you forgot stayed in the Hall occupying the
+## 4-person cap with no way to reach them one-on-one.
+func _dismiss_all_attendees() -> void:
+	for id in GameManager.group_chat.dismiss_all():
+		_walk_attendee_out(String(id))
 
 
 func _send_group_line() -> void:
@@ -1691,6 +1766,12 @@ func _send_group_line() -> void:
 		"dismiss":
 			gc.log_player_command(text)
 			_dismiss_attendee(id)
+		"dismiss_all":
+			gc.log_player_command(text)
+			_dismiss_all_attendees()
+		"move":
+			gc.log_player_command(text)
+			_move_attendee_out(id, String(cmd.get("room", "")))
 		"unmute":
 			# Restoring someone by name also gives them the floor - "Marcus, go
 			# ahead" plainly expects Marcus to say something, not just to
