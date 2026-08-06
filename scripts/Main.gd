@@ -12,11 +12,20 @@ const WALL_T := 0.4
 const DOOR_W := 3.0
 
 # The Hall doubles as the meetup room: suspects ordered there gather for a
-# group confrontation. Capped because every attendee costs one sequential
-# Ollama call per line the detective says, and because a confrontation with
-# more than four voices stops being readable.
+# group confrontation.
+#
+# The cap counts SUSPECTS, not people - the detective is never an attendee - so
+# 2 means a three-handed scene: you and two of them. That's deliberately the
+# whole format. A two-hander is the sharpest possible confrontation (one
+# accuses, one defends, you referee), a round costs only two sequential Ollama
+# calls instead of four, and each suspect's memory fills half as fast. It also
+# halves the number of other names in the room that a small model can mistake
+# for the detective, which is the failure that kept surfacing at four.
+#
+# Raise this back to 4 for bigger, messier confrontations - nothing else
+# depends on the value.
 const MEETUP_ROOM := "Hall"
-const MAX_HALL_ATTENDEES := 4
+const MAX_HALL_ATTENDEES := 2
 
 # 3x3 layout. Hall (front door + player spawn) sits at the front-center so
 # the front door can face the exterior.
@@ -124,6 +133,7 @@ var selection_layer: CanvasLayer
 var selection_checkboxes: Dictionary = {} # character_id -> CheckBox
 var selection_count_label: Label
 var selection_start_button: Button
+var selection_log_checkbox: CheckBox
 
 
 func _ready() -> void:
@@ -252,6 +262,19 @@ func _build_selection_screen() -> void:
 	selection_count_label = Label.new()
 	vbox.add_child(selection_count_label)
 
+	selection_log_checkbox = CheckBox.new()
+	selection_log_checkbox.text = "Write a dialogue log for this session (testing)"
+	selection_log_checkbox.button_pressed = GameManager.dialogue_log_enabled
+	selection_log_checkbox.tooltip_text = "Saves every line every suspect says to a markdown file in DialogueLogs/, alongside the game's ground truth, for reviewing hallucinations afterwards."
+	vbox.add_child(selection_log_checkbox)
+
+	var log_hint := Label.new()
+	log_hint.text = "Saved to DialogueLogs/ next to the project. The exact path is printed to the output console when the game starts."
+	log_hint.autowrap_mode = TextServer.AUTOWRAP_WORD
+	log_hint.add_theme_font_size_override("font_size", 12)
+	log_hint.add_theme_color_override("font_color", Color(1, 1, 1, 0.55))
+	vbox.add_child(log_hint)
+
 	var button_row := HBoxContainer.new()
 	button_row.add_theme_constant_override("separation", 10)
 	vbox.add_child(button_row)
@@ -316,6 +339,12 @@ func _on_start_pressed() -> void:
 			selected_ids.append(id)
 	if selected_ids.size() < 2:
 		return
+
+	# Read before the selection screen is freed, and set before start_new_game()
+	# below - that's where the session's log file is created.
+	if selection_log_checkbox != null:
+		GameManager.dialogue_log_enabled = selection_log_checkbox.button_pressed
+	selection_log_checkbox = null
 
 	selection_layer.queue_free()
 	selection_layer = null

@@ -50,9 +50,9 @@ view/UI stretch to fill whatever size you resize it to (no black bars).
   locally, so it costs no thinking time and they don't answer it in
   character - you just get a short acknowledgement.
 - **Hall meetups** - send suspects to the Hall one at a time and they'll
-  gather there (up to 4; a fifth will refuse in character). Walk into the
-  Hall yourself with two or more of them present and the interact prompt
-  changes to **Address the room**. See "Confronting them together" below.
+  gather there (two of them; a third will refuse in character). Walk into
+  the Hall yourself with both present and the interact prompt changes to
+  **Address the room**. See "Confronting them together" below.
 - **Tab** - open/close your case notes. Each suspect gets their own tab
   down the left side; click one to see their notes on the right, organized
   into four sections:
@@ -123,10 +123,13 @@ story. To catch someone in a lie you generally need the person who can
 contradict them standing in the same room.
 
 - **Gathering.** Tell suspects "go to the hall" in their own conversations,
-  one at a time. The Hall holds 4; a fifth will refuse rather than crowd in.
-- **Starting.** Walk into the Hall with at least two of them there and
-  interact. Nothing happens until *you* speak - they'll stand there
-  indefinitely otherwise.
+  one at a time. The Hall holds two of them; a third will refuse rather than
+  crowd in. A three-handed scene - you and two suspects - is deliberate: one
+  accuses, one defends, and you referee. It's also twice as fast as a
+  four-way, since every attendee costs one more request per line you say.
+- **Starting.** Walk into the Hall with both of them there and interact.
+  Nothing happens until *you* speak - they'll stand there indefinitely
+  otherwise.
 - **Taking turns.** Say something to the room and each un-silenced suspect
   answers once, in turn, each hearing what the ones before them just said.
   The order rotates every round so the same person isn't always first to

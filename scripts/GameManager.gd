@@ -4,6 +4,8 @@ extends Node
 # local Ollama server running llama3.2:3b to generate in-character responses,
 # and checks the player's final accusation at the front door.
 
+const DialogueLogScript = preload("res://Scripts/DialogueLog.gd")
+
 const OLLAMA_URL := "http://127.0.0.1:11434/api/chat"
 const OLLAMA_MODEL := "huihui_ai/llama3.2-abliterate:3b"
 const MAX_RESPONSE_TOKENS := 300 # hard safety cap - the prompt aims well under this so it's rarely hit mid-sentence
@@ -155,6 +157,15 @@ var group_chat: Node = null
 ## buried far from the generation point (a prompting problem). Testing aid only.
 var debug_dump_group: bool = false
 
+## Testing aid, toggled on the suspect-selection screen. When on, every line
+## any suspect says is written to a markdown file (see Scripts/DialogueLog.gd)
+## for reviewing hallucinations afterwards. The whole file is rewritten on each
+## new line rather than appended to, so it's always complete even if the game
+## is closed mid-session - the transcript is small enough that the cost doesn't
+## matter next to an Ollama round-trip.
+var dialogue_log_enabled: bool = false
+var dialogue_log_path: String = "" # res:// or user:// path for this session, "" when off
+
 var murderer_id: String = ""
 var murder_weapon: String = ""
 var murder_time: String = ""
@@ -260,6 +271,16 @@ func start_new_game(character_ids: Array = []) -> void:
 	var mc := get_character(murderer_id)
 	print("[DEBUG] Murderer this game: %s (id=%s) - used %s %s. Press F1 in-game to show/hide this on screen." % [mc.get("name", "?"), murderer_id, murder_weapon, murder_time])
 
+	dialogue_log_path = ""
+	if dialogue_log_enabled:
+		dialogue_log_path = DialogueLogScript.new_session_path()
+		var written := _refresh_dialogue_log()
+		if written == "":
+			push_warning("Dialogue log is on but the file could not be written to %s" % dialogue_log_path)
+			dialogue_log_path = ""
+		else:
+			print("[DEBUG] Dialogue log for this session: %s" % written)
+
 
 func get_character(id: String) -> Dictionary:
 	for c in CHARACTERS:
@@ -289,7 +310,34 @@ func _build_system_prompt(id: String) -> String:
 	text += "asks you to explain something in detail.\n\n"
 
 	text += "THE CASE: %s, the owner of Archibald Manor, was found dead last night in %s. " % [VICTIM_NAME, MURDER_ROOM]
-	text += "A detective (the player) is questioning every guest in the house, one on one, trying to figure out who did it.\n\n"
+	text += "A detective (the player) is questioning every guest in the house, trying to figure out who did it.\n\n"
+
+	# Without an explicit cast list, characters populate the manor with people
+	# who don't exist - housekeepers, nieces, visiting couples - and then treat
+	# them as witnesses and alibis. Worse, in a group scene one suspect invents
+	# someone and the other corroborates them, because hearing it said out loud
+	# is indistinguishable from it being true.
+	var others := []
+	for c2 in active_characters():
+		if c2["id"] != id:
+			others.append("%s (%s)" % [String(c2["name"]), String(c2["job"])])
+	text += "EVERYONE IN THE HOUSE:\n"
+	text += "- You.\n- The detective questioning you.\n"
+	for o in others:
+		text += "- %s\n" % o
+	text += "- %s, the victim, now dead.\n" % VICTIM_NAME
+	text += "That list is complete. There is nobody else here - no other guests, no staff, no "
+	text += "servants, no family, no visitors, nobody from the village. Never mention or refer to "
+	text += "a person who is not on that list, and never invent a name. If you did not see who did "
+	text += "something, say you did not see who it was.\n\n"
+
+	text += "WHAT YOU KNOW AND DO NOT KNOW: you only know what you saw yourself, and what someone "
+	text += "said to you directly. If the detective asks about something you did not witness, a room "
+	text += "you were not in, or a conversation you were not part of, say plainly that you do not "
+	text += "know. Do not guess, and never invent an event, a person, or a conversation to fill the "
+	text += "gap - an honest \"I wasn't there\" is always better than a made-up answer. The detective "
+	text += "may also describe things that never happened; if you have no memory of it, say so "
+	text += "instead of playing along.\n\n"
 
 	text += "YOUR CHARACTER:\n"
 	text += "- Name: %s\n" % c["name"]
@@ -439,6 +487,14 @@ func ask_group_member(id: String, prompt: String, player_line: String = "", witn
 	})
 
 
+## Rewrites the session's dialogue log if one is enabled. Returns the absolute
+## path written, or "" if logging is off or the write failed.
+func _refresh_dialogue_log() -> String:
+	if not dialogue_log_enabled or dialogue_log_path == "":
+		return ""
+	return DialogueLogScript.write(self, dialogue_log_path)
+
+
 ## Prints one group request's full message list, with each message's distance
 ## from the generation point - the number that actually matters when a suspect
 ## seems to have forgotten something. Roughly 4 characters per token.
@@ -483,7 +539,31 @@ func _strip_speaker_prefix(text: String, id: String) -> String:
 				var idx := trimmed.find(":")
 				out = trimmed.substr(idx + 1).lstrip("* \t").strip_edges()
 				break
-	return out
+	return _strip_wrapping_quotes(out)
+
+
+## Removes quotation marks around a whole reply. Group scenes quote every line
+## in the narrated block they read ('X said out loud: "..."'), so the model
+## copies the convention and hands its own line back quoted - which then gets
+## printed with quotes the one-on-one dialogue never has. Only strips when the
+## quotes genuinely wrap the entire reply, so a line that quotes someone else
+## partway through is left alone.
+func _strip_wrapping_quotes(text: String) -> String:
+	var t := text.strip_edges()
+	while t.length() >= 2:
+		var first := t.substr(0, 1)
+		var last := t.substr(t.length() - 1, 1)
+		var is_pair := (first == "\"" and last == "\"") or (first == "'" and last == "'")
+		is_pair = is_pair or (first == "“" and last == "”")
+		if not is_pair:
+			break
+		var inner := t.substr(1, t.length() - 2)
+		# Bail out if the inner text still has an unbalanced quote of the same
+		# kind - that means the outer pair wasn't a wrapper after all.
+		if inner.count(first) != inner.count(last):
+			break
+		t = inner.strip_edges()
+	return t
 
 
 ## All the Q&A transcript entries for one character, in the order they
@@ -757,6 +837,7 @@ func _on_request_completed(result: int, response_code: int, _headers: PackedStri
 		var q := String(item.get("question", ""))
 		_histories[character_id].append({"role": "assistant", "content": content})
 		transcript.append({"character_id": character_id, "question": q, "answer": content})
+		_refresh_dialogue_log()
 		ollama_response.emit(character_id, content)
 	elif kind == "summary":
 		_summaries[character_id] = _parse_summary_sections(content)
@@ -778,6 +859,7 @@ func _on_request_completed(result: int, response_code: int, _headers: PackedStri
 			"scene": "group",
 			"heard_by": item.get("witnesses", []),
 		})
+		_refresh_dialogue_log()
 		group_response.emit(character_id, spoken, int(item.get("token", 0)))
 
 	_process_queue()

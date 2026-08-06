@@ -58,6 +58,16 @@ var _queue: Array = [] # ids still owed a turn this round
 var _speaking_id: String = "" # whose turn is currently in flight ("" if none)
 var _round_start: int = 0 # rotates each round so the same suspect doesn't always open
 var _direct_round: bool = false # this round was aimed at one named suspect
+
+## Who has already answered the CURRENT question, in order, as [{id, text}].
+## Cleared at the start of every round.
+##
+## Without this a suspect has no idea whether they are first to speak or last,
+## and will confidently refer to what another guest "already said" when that
+## guest hasn't spoken yet - inventing the reply and then contradicting itself
+## about it in the same sentence. Stating the round position explicitly is much
+## more reliable than hoping the model infers it from message order.
+var _round_replies: Array = []
 var _last_player_line: String = "" # what the detective last said aloud, for transcript entries
 var _gm: Node = null
 
@@ -69,6 +79,22 @@ var _gm: Node = null
 ## never reaches the room.
 var _next_token: int = 0
 var _pending_token: int = -1 # -1 means "not waiting on anything"
+
+## What each attendee has heard but not yet been given a turn to react to.
+##
+## Everything a character hears has to be stored under the "user" role - the
+## chat API has no third role for "someone else in the room". Writing each line
+## as its own user message therefore made the user role mean the detective on
+## one line and another guest on the next, and a small model reading that
+## history has no way to tell which of them is now talking to it. That is what
+## produced suspects calling the detective by another suspect's name and
+## replying to remarks nobody had just made.
+##
+## So lines are buffered here and flushed as ONE narrated message on that
+## character's turn (see _flush_heard). The user role then always means the
+## same thing - the narrator relaying the scene - and other guests appear only
+## as quoted, clearly-attributed speech inside it.
+var _heard_buffer: Dictionary = {} # character_id -> Array[String]
 
 
 func _ready() -> void:
@@ -90,6 +116,7 @@ func start(ids: Array) -> void:
 	attendees = ids.duplicate()
 	scene_log.clear()
 	muted.clear()
+	_heard_buffer.clear()
 	_queue.clear()
 	_speaking_id = ""
 	_round_start = 0
@@ -116,12 +143,56 @@ func stop() -> void:
 	active = false
 	attendees.clear()
 	muted.clear()
+	_heard_buffer.clear()
 	_queue.clear()
 	_speaking_id = ""
 	_direct_round = false
 	# Anything still in flight belongs to a scene that no longer exists.
 	_pending_token = -1
 	_set_state("idle")
+
+
+## Queues a line for everyone in the room except `except_id`, to be narrated to
+## each of them when their turn comes round.
+func _broadcast(line: String, except_id: String = "") -> void:
+	for id in attendees:
+		if id == except_id:
+			continue
+		if not _heard_buffer.has(id):
+			_heard_buffer[id] = []
+		_heard_buffer[id].append(line)
+
+
+## Turns everything one suspect has heard since their last turn into a single
+## narrated message and writes it to their memory. Returns false if they hadn't
+## missed anything.
+##
+## The framing matters as much as the consolidation: the block is explicitly a
+## report of the room, the detective is named in capitals as the person
+## questioning them, and every other voice is tagged as a guest who is NOT the
+## detective. There is then nothing in their history that a later private
+## question could be confused with.
+func _flush_heard(id: String) -> bool:
+	var lines: Array = _heard_buffer.get(id, [])
+	if lines.is_empty():
+		return false
+	_heard_buffer[id] = []
+
+	var others := []
+	for other in attendees:
+		if other != id:
+			others.append(String(_gm.get_character(other).get("name", "")))
+
+	var text := "[THE HALL - you are in a group conversation."
+	if others.is_empty():
+		text += " Everyone else has left; only the detective is still with you.]\n"
+	else:
+		text += " Also present: %s.]\n" % _join_names(others)
+	text += "Since you last spoke, in order:\n"
+	for line in lines:
+		text += "  %s\n" % line
+	_gm.note_to_character(id, text)
+	return true
 
 
 ## Closes the scene out in one suspect's memory: the room emptied, and from
@@ -138,6 +209,11 @@ func stop() -> void:
 func _note_scene_ended(id: String) -> void:
 	if _gm == null:
 		return
+	# Anything they heard but never got a turn to answer - a silenced suspect
+	# who listened to the whole scene, most often - still has to reach memory,
+	# or being muted would mean being deaf after all.
+	_flush_heard(id)
+	_heard_buffer.erase(id)
 	var text := "[The gathering in the hall is over. The other guests have left and gone back to their own rooms. "
 	text += "You are alone with the detective again. Everything said to you from this point on is the detective "
 	text += "speaking to you privately - no other guest is present, and nothing you are told now comes from one of them. "
@@ -325,15 +401,13 @@ func submit_player_line(raw: String, direct_id: String = "") -> void:
 	_add_line("", text, "say")
 	_last_player_line = text
 	# Everyone present hears the detective, including anyone who won't reply
-	# this round - being silenced doesn't make you deaf.
-	# "The detective" vs "Another guest" below is load-bearing: both end up
-	# stored under the same "user" role, so the wording is the only thing
-	# telling the model which of them is speaking.
-	var heard := "[In the hall] THE DETECTIVE says to the room: \"%s\"" % text
+	# this round - being silenced doesn't make you deaf. Buffered rather than
+	# written straight to memory: it gets narrated to each suspect on their
+	# turn, together with anything else they missed.
+	var heard := "THE DETECTIVE (the person questioning you) said to the room: \"%s\"" % text
 	if direct_id != "":
-		heard = "[In the hall] THE DETECTIVE says to %s: \"%s\"" % [_speaker_label(direct_id), text]
-	for id in attendees:
-		_gm.note_to_character(id, heard)
+		heard = "THE DETECTIVE (the person questioning you) said to %s: \"%s\"" % [_speaker_label(direct_id), text]
+	_broadcast(heard)
 
 	_begin_round(direct_id)
 
@@ -345,6 +419,7 @@ func submit_player_line(raw: String, direct_id: String = "") -> void:
 ## to the one suspect who was named.
 func _begin_round(direct_id: String = "") -> void:
 	_queue.clear()
+	_round_replies.clear()
 	_direct_round = direct_id != ""
 
 	if _direct_round:
@@ -388,6 +463,10 @@ func _next_turn() -> void:
 		_next_turn()
 		return
 
+	# Narrate everything they've missed into memory as one message, before the
+	# request snapshots their history.
+	_flush_heard(id)
+
 	_speaking_id = id
 	turn_started.emit(id)
 	# Witnesses are everyone else in the room right now, muted or not - being
@@ -401,51 +480,84 @@ func _next_turn() -> void:
 	_gm.ask_group_member(id, _build_turn_prompt(id), _last_player_line, witnesses, _pending_token)
 
 
-## The instruction handed to one attendee when it's their turn. Deliberately
-## short and content-free: what was just said in the room is already sitting in
-## their history as notes (see GameManager.note_to_character), immediately
-## before this, so repeating it here would both waste context and duplicate the
-## conversation. This prompt is ephemeral - GameManager sends it but never
-## stores it.
+## The instruction handed to one attendee when it's their turn. It carries no
+## account of what was just said: that's already in their history as the single
+## narrated block _flush_heard() wrote immediately before this, so repeating it
+## would both waste context and tell the story twice. This prompt is ephemeral -
+## GameManager sends it but never stores it.
+## Order here is the whole point, and it is easy to get backwards.
+##
+## Reference material (their own past claims) goes FIRST; the question they
+## have to answer goes LAST, immediately before generation. An earlier version
+## had it the other way round - the recap was appended at the end to keep their
+## story in view - and the result was suspects who answered a question nobody
+## asked and repeated their previous line word for word. They weren't
+## forgetting anything: the last thing they read was their own prior answer, so
+## that is what they produced again. Whatever sits closest to the generation
+## point is what gets answered, so the detective's line must be closest.
 func _build_turn_prompt(id: String) -> String:
 	var c: Dictionary = _gm.get_character(id)
-	var text := "[The hall is waiting for you to answer.]\n"
+	var text := ""
 
-	# Their own earlier account, replayed here rather than left buried under
-	# everyone else's hall chatter. This is the difference between a suspect who
-	# holds their story under pressure and one who quietly drifts off it.
+	# Their own account so far - private first, then this scene. Kept at the
+	# top as background they must not contradict, not as the thing to respond to.
 	var recap: String = _gm.private_recap(id)
-	if recap != "":
-		text += "\nWhat you have already told the detective in private:\n"
-		text += recap
-
-	# And what they've said in THIS room, in this scene. Just as important:
-	# without it a suspect will cheerfully contradict a line they gave two
-	# turns ago, because by then it's several messages back behind three other
-	# people talking. Their own words are the last thing they should be losing
-	# track of.
 	var said: String = _own_recent_lines(id)
-	if said != "":
-		text += "\nWhat you have already said out loud in this room:\n"
-		text += said
-
 	if recap != "" or said != "":
-		# Careful with this wording. An earlier version said "do not reword
-		# something you already said", which a small model reads as an
-		# instruction to repeat the line verbatim - and it did, word for word,
-		# turn after turn. Consistency has to be stated as "don't contradict",
-		# never as "don't rephrase", and it has to be paired with an explicit
-		# push to move forward.
-		text += "All of the above is your own account. Do not contradict any of it. "
-		text += "Do NOT repeat a line you have already said - say something new that moves the "
-		text += "conversation forward. If someone in this room contradicts your account, challenge them.\n"
+		text += "[YOUR OWN ACCOUNT SO FAR - background only, not the question]\n"
+		if recap != "":
+			text += "Told to the detective in private:\n" + recap
+		if said != "":
+			text += "Already said out loud in this room:\n" + said
+		# These two rules have to be separated carefully or they fight, and the
+		# model resolves the fight in the worst possible way.
+		#
+		# "Do not contradict this" + "what you say next must be new" reads as
+		# permission - even pressure - to invent a NEW ACCOUNT. Observed live:
+		# a suspect's alibi went garden walk, garden walk, "I never said that",
+		# asleep in my room. She was obeying "say something new".
+		#
+		# So the novelty rule must be scoped explicitly to WORDING, and the
+		# consistency rule to SUBSTANCE.
+		text += "Those are your own words and they still stand. Never reverse, deny, or replace "
+		text += "an account you have already given - if you are challenged about it, hold to it. "
+		text += "You may add new detail or say it a different way; just do not repeat a line "
+		text += "word for word.\n\n"
 
-	text += "\nYou are %s. Say ONE short line out loud to the room - 1 to 2 sentences. " % String(c.get("name", ""))
-	text += "Answer the detective, respond to what someone just said, disagree with them, "
-	text += "or call someone out if you believe they are lying. "
-	text += "Only refer to things you actually remember - if the detective describes an event you have "
-	text += "no memory of, say so plainly rather than playing along. "
-	text += "Do not narrate actions. Do not speak for anyone else. Do not write your own name before your line."
+	var here := _display_names(attendees)
+	text += "You are %s. Reply out loud to the room in ONE short line of 1 to 2 sentences. " % String(c.get("name", ""))
+	text += "You may disagree with what another guest just said, or call them out if you believe they "
+	text += "are lying. Only refer to things you actually remember - if the detective describes an event "
+	text += "you have no memory of, say so plainly rather than playing along. "
+	# The detective can address someone who isn't here, either by mistake or to
+	# see what happens. Left unguarded, everyone invents that person's
+	# whereabouts and testimony out of nothing.
+	text += "The only people in this room are %s and the detective. " % _join_names(here)
+	text += "If the detective names anyone else, say that person is not here - never answer for them "
+	text += "and never claim to have heard them speak. "
+	text += "Do not narrate actions, do not use asterisks, do not wrap your reply in quotation marks, "
+	text += "do not speak for anyone else, and do not write your own name before your line.\n\n"
+
+	text += "-----\n"
+	if _last_player_line == "":
+		return text + "The room is waiting. Speak now."
+
+	if _direct_round:
+		text += "THE DETECTIVE HAS JUST ASKED YOU DIRECTLY: \"%s\"\n\n" % _last_player_line
+	else:
+		text += "THE DETECTIVE HAS JUST ASKED THE ROOM: \"%s\"\n\n" % _last_player_line
+
+	# Exactly who has answered this question so far, so nobody has to guess.
+	if _round_replies.is_empty():
+		text += "Nobody has answered yet - you are the first to speak. Do not refer to what "
+		text += "anyone else said about this; they have not said anything yet.\n\n"
+	else:
+		text += "Already answered since the detective asked:\n"
+		for r in _round_replies:
+			text += "  %s said: \"%s\"\n" % [_speaker_label(String(r["id"])), String(r["text"])]
+		text += "Those are the only replies so far. Do not invent anything else anyone said.\n\n"
+
+	text += "Answer the detective's question now, in your own words."
 	return text
 
 
@@ -477,13 +589,12 @@ func _on_group_response(character_id: String, text: String, token: int) -> void:
 	_pending_token = -1
 	_speaking_id = ""
 	_add_line(character_id, text, "say")
+	_round_replies.append({"id": character_id, "text": text})
 
 	# Everyone else in the room heard it, whether or not they reply this round.
 	var c: Dictionary = _gm.get_character(character_id)
-	var heard := "[In the hall] ANOTHER GUEST, %s (not the detective), said out loud to the room: \"%s\"" % [String(c.get("name", "")), text]
-	for other in attendees:
-		if other != character_id:
-			_gm.note_to_character(other, heard)
+	var heard := "%s (another guest in the room - NOT the detective) said out loud: \"%s\"" % [String(c.get("name", "")), text]
+	_broadcast(heard, character_id)
 
 	_next_turn()
 
