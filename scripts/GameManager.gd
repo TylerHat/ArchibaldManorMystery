@@ -4,10 +4,33 @@ extends Node
 # local Ollama server running llama3.2:3b to generate in-character responses,
 # and checks the player's final accusation at the front door.
 
+const DialogueLogScript = preload("res://Scripts/DialogueLog.gd")
+
 const OLLAMA_URL := "http://127.0.0.1:11434/api/chat"
 const OLLAMA_MODEL := "huihui_ai/llama3.2-abliterate:3b"
 const MAX_RESPONSE_TOKENS := 300 # hard safety cap - the prompt aims well under this so it's rarely hit mid-sentence
-const SUMMARY_MAX_TOKENS := 260 # three labeled sections need a bit more room
+const SUMMARY_MAX_TOKENS := 340 # four labeled sections need a bit more room
+# Group-scene lines are capped much harder than one-on-one answers: a Hall
+# meetup costs one sequential request PER attendee for every line the
+# detective says, so per-reply length is the entire latency budget. Short,
+# sharp interruptions are better drama than paragraphs anyway.
+const GROUP_MAX_TOKENS := 90
+
+# How much conversation the model is allowed to keep in view. This MUST be set
+# explicitly: Ollama's default context is small (2048 on older builds, 4096 on
+# newer ones), and when a conversation outgrows it the oldest messages are
+# silently dropped. A suspect's private interview is the oldest thing in their
+# history after the system prompt, so it is the first thing evicted - which is
+# exactly the wrong thing to forget when you've hauled them into the hall to be
+# confronted with what they told you earlier. A group scene fills the window
+# several times faster than a private one, because every attendee's line is
+# written into every other attendee's history.
+const OLLAMA_NUM_CTX := 8192
+
+# How much of a suspect's private interview gets replayed into their group-scene
+# turn prompt. See private_recap() for why this exists at all.
+const RECAP_MAX_ITEMS := 4
+const RECAP_MAX_CHARS := 160
 
 const VICTIM_NAME := "Lord Reginald Archibald"
 const MURDER_ROOM := "the Billiard Room"
@@ -116,11 +139,45 @@ signal ollama_response(character_id, text)
 signal ollama_error(character_id, message)
 signal summary_ready(character_id, text)
 signal summary_error(character_id, message)
+# Group signals carry the token GroupChat tagged the request with, so a reply
+# that arrives after its scene was closed (or after the turn moved on) can be
+# recognised as stale and dropped instead of being spoken by someone who has
+# left the room.
+signal group_response(character_id, text, token)
+signal group_error(character_id, message, token)
+
+## Turn engine for Hall meetups (see Scripts/GroupChat.gd). Created as a child
+## in _ready() so it rides on the same request queue as everything else.
+var group_chat: Node = null
+
+## When true, every group-scene request prints the exact message list it's
+## sending to the Godot console. Toggled with F2 in-game. Worth reaching for
+## whenever a suspect seems to have forgotten something - it shows at a glance
+## whether the information is missing from the payload (a bug) or present but
+## buried far from the generation point (a prompting problem). Testing aid only.
+var debug_dump_group: bool = false
+
+## Testing aid, toggled on the suspect-selection screen. When on, every line
+## any suspect says is written to a markdown file (see Scripts/DialogueLog.gd)
+## for reviewing hallucinations afterwards. The whole file is rewritten on each
+## new line rather than appended to, so it's always complete even if the game
+## is closed mid-session - the transcript is small enough that the cost doesn't
+## matter next to an Ollama round-trip.
+var dialogue_log_enabled: bool = false
+var dialogue_log_path: String = "" # res:// or user:// path for this session, "" when off
 
 var murderer_id: String = ""
 var murder_weapon: String = ""
 var murder_time: String = ""
-var transcript: Array = [] # [{character_id, question, answer}]
+
+## Every line a suspect has given the detective, in the order it happened.
+## Entries are {character_id, question, answer}; lines spoken during a Hall
+## meetup add two more keys:
+##   "scene": "group"   - said out loud in front of other suspects
+##   "heard_by": [ids]  - who else was in the room at the time
+## One-on-one entries simply omit both, so anything reading this array can
+## treat a missing "scene" as a private interview.
+var transcript: Array = []
 
 # Which of the 8 CHARACTERS are actually in the mansion this game, chosen on
 # the pre-game selection screen. Defaults to all 8 if start_new_game() is
@@ -150,6 +207,14 @@ func _ready() -> void:
 	add_child(_http)
 	_http.request_completed.connect(_on_request_completed)
 
+	group_chat = load("res://Scripts/GroupChat.gd").new()
+	group_chat.name = "GroupChat"
+	add_child(group_chat)
+	# Connected from this side rather than inside GroupChat._ready(), which runs
+	# before the GameManager autoload name is resolvable.
+	group_response.connect(group_chat._on_group_response)
+	group_error.connect(group_chat._on_group_error)
+
 
 func _setup_input_map() -> void:
 	_add_key_action("move_forward", KEY_W)
@@ -160,6 +225,7 @@ func _setup_input_map() -> void:
 	_add_key_action("toggle_notes", KEY_TAB)
 	_add_key_action("jump", KEY_SPACE)
 	_add_key_action("toggle_debug", KEY_F1)
+	_add_key_action("toggle_prompt_dump", KEY_F2)
 
 
 func _add_key_action(action_name: String, keycode: int) -> void:
@@ -197,11 +263,23 @@ func start_new_game(character_ids: Array = []) -> void:
 	_request_queue.clear()
 	_busy = false
 	_current_request = {}
+	if group_chat != null:
+		group_chat.stop()
 	for c in pool:
 		_histories[c["id"]] = [{"role": "system", "content": _build_system_prompt(c["id"])}]
 
 	var mc := get_character(murderer_id)
 	print("[DEBUG] Murderer this game: %s (id=%s) - used %s %s. Press F1 in-game to show/hide this on screen." % [mc.get("name", "?"), murderer_id, murder_weapon, murder_time])
+
+	dialogue_log_path = ""
+	if dialogue_log_enabled:
+		dialogue_log_path = DialogueLogScript.new_session_path()
+		var written := _refresh_dialogue_log()
+		if written == "":
+			push_warning("Dialogue log is on but the file could not be written to %s" % dialogue_log_path)
+			dialogue_log_path = ""
+		else:
+			print("[DEBUG] Dialogue log for this session: %s" % written)
 
 
 func get_character(id: String) -> Dictionary:
@@ -232,7 +310,34 @@ func _build_system_prompt(id: String) -> String:
 	text += "asks you to explain something in detail.\n\n"
 
 	text += "THE CASE: %s, the owner of Archibald Manor, was found dead last night in %s. " % [VICTIM_NAME, MURDER_ROOM]
-	text += "A detective (the player) is questioning every guest in the house, one on one, trying to figure out who did it.\n\n"
+	text += "A detective (the player) is questioning every guest in the house, trying to figure out who did it.\n\n"
+
+	# Without an explicit cast list, characters populate the manor with people
+	# who don't exist - housekeepers, nieces, visiting couples - and then treat
+	# them as witnesses and alibis. Worse, in a group scene one suspect invents
+	# someone and the other corroborates them, because hearing it said out loud
+	# is indistinguishable from it being true.
+	var others := []
+	for c2 in active_characters():
+		if c2["id"] != id:
+			others.append("%s (%s)" % [String(c2["name"]), String(c2["job"])])
+	text += "EVERYONE IN THE HOUSE:\n"
+	text += "- You.\n- The detective questioning you.\n"
+	for o in others:
+		text += "- %s\n" % o
+	text += "- %s, the victim, now dead.\n" % VICTIM_NAME
+	text += "That list is complete. There is nobody else here - no other guests, no staff, no "
+	text += "servants, no family, no visitors, nobody from the village. Never mention or refer to "
+	text += "a person who is not on that list, and never invent a name. If you did not see who did "
+	text += "something, say you did not see who it was.\n\n"
+
+	text += "WHAT YOU KNOW AND DO NOT KNOW: you only know what you saw yourself, and what someone "
+	text += "said to you directly. If the detective asks about something you did not witness, a room "
+	text += "you were not in, or a conversation you were not part of, say plainly that you do not "
+	text += "know. Do not guess, and never invent an event, a person, or a conversation to fill the "
+	text += "gap - an honest \"I wasn't there\" is always better than a made-up answer. The detective "
+	text += "may also describe things that never happened; if you have no memory of it, say so "
+	text += "instead of playing along.\n\n"
 
 	text += "YOUR CHARACTER:\n"
 	text += "- Name: %s\n" % c["name"]
@@ -276,9 +381,189 @@ func ask_character(id: String, question: String) -> void:
 		# question, which is the single biggest cause of multi-minute waits -
 		# far bigger than model size or CPU vs GPU. ~120 tokens is roughly a
 		# short paragraph, plenty for an in-character answer.
-		"options": {"num_predict": MAX_RESPONSE_TOKENS, "temperature": 0.8},
+		"options": {"num_predict": MAX_RESPONSE_TOKENS, "temperature": 0.8, "num_ctx": OLLAMA_NUM_CTX},
 	}
 	_enqueue({"kind": "dialogue", "character_id": id, "question": question, "body": body})
+
+
+## A compact reminder of what this suspect has already told the detective in
+## private - their own answers only, newest last, one per line.
+##
+## Their full interview is already in their history and is sent with every
+## group request, so this is NOT about the model lacking the information. It's
+## about where the information sits. By the third round of a meetup the
+## interview is a dozen messages back, behind everyone else's chatter, and
+## generation is dominated by what's nearest - so the suspect drifts off the
+## story they gave you an hour ago without ever noticing. Replaying it at the
+## generation point costs ~80 tokens and puts their own account where the model
+## is actually looking.
+##
+## Group lines are excluded on purpose: those are already public, and the
+## interesting failure is a private story quietly diverging from a public one.
+func private_recap(character_id: String) -> String:
+	var answers := []
+	for e in transcript:
+		if String(e["character_id"]) != character_id:
+			continue
+		if String(e.get("scene", "")) == "group":
+			continue
+		answers.append(String(e["answer"]))
+	if answers.is_empty():
+		return ""
+	if answers.size() > RECAP_MAX_ITEMS:
+		answers = answers.slice(answers.size() - RECAP_MAX_ITEMS)
+
+	var out := ""
+	for a in answers:
+		out += "- %s\n" % _condense(String(a))
+	return out
+
+
+## Flattens an answer to a single line and clips it at a word boundary, so a
+## rambling reply doesn't cost as much as the rest of the turn prompt.
+func _condense(text: String) -> String:
+	var t := text.strip_edges().replace("\n", " ").replace("\r", " ")
+	while t.find("  ") != -1:
+		t = t.replace("  ", " ")
+	if t.length() <= RECAP_MAX_CHARS:
+		return t
+	var cut := t.substr(0, RECAP_MAX_CHARS)
+	var space := cut.rfind(" ")
+	if space > int(RECAP_MAX_CHARS / 2.0):
+		cut = cut.substr(0, space)
+	return cut + "..."
+
+
+## Adds something a character HEARD to their private memory without asking
+## them for a reply. Used by GroupChat so everyone standing in the Hall
+## remembers the whole confrontation - not just the lines they answered - and
+## can bring it up later in a one-on-one interrogation.
+func note_to_character(id: String, text: String) -> void:
+	if not _histories.has(id):
+		return
+	_histories[id].append({"role": "user", "content": text})
+
+
+## Asks one attendee of a Hall meetup for their line. `player_line` is whatever
+## the detective last said to the room and `witnesses` is everyone else present
+## - both are carried through to the transcript entry so the case notes can
+## tell a public claim from a private one. Response arrives via
+## group_response / group_error.
+##
+## `prompt` is the turn instruction ("you're in a group scene, say one short
+## line") and is deliberately NOT stored in the character's history - it's
+## direction to the actor, not something the character said, heard, or should
+## remember. Persisting it once per turn per attendee used to bury the actual
+## conversation under repeated copies of the same instruction, crowding the
+## earlier private interview out of the context window. What the character
+## genuinely experienced is already in their history, written there by
+## note_to_character().
+func ask_group_member(id: String, prompt: String, player_line: String = "", witnesses: Array = [], token: int = 0) -> void:
+	if not _histories.has(id):
+		group_error.emit(id, "That suspect isn't part of this game.", token)
+		return
+	var messages: Array = _histories[id].duplicate()
+	messages.append({"role": "user", "content": prompt})
+	if debug_dump_group:
+		_dump_group_payload(id, messages)
+	var body := {
+		"model": OLLAMA_MODEL,
+		"messages": messages,
+		"stream": false,
+		# Lower temperature than one-on-one dialogue on purpose. In a private
+		# interview a bit of variety makes a suspect feel alive; in a group
+		# scene the same variety reads as a character who can't keep their
+		# story straight, because every line is immediately checkable against
+		# what they said two turns ago in front of witnesses.
+		"options": {"num_predict": GROUP_MAX_TOKENS, "temperature": 0.6, "num_ctx": OLLAMA_NUM_CTX},
+	}
+	_enqueue({
+		"kind": "group",
+		"character_id": id,
+		"player_line": player_line,
+		"witnesses": witnesses.duplicate(),
+		"token": token,
+		"body": body,
+	})
+
+
+## Rewrites the session's dialogue log if one is enabled. Returns the absolute
+## path written, or "" if logging is off or the write failed.
+func _refresh_dialogue_log() -> String:
+	if not dialogue_log_enabled or dialogue_log_path == "":
+		return ""
+	return DialogueLogScript.write(self, dialogue_log_path)
+
+
+## Prints one group request's full message list, with each message's distance
+## from the generation point - the number that actually matters when a suspect
+## seems to have forgotten something. Roughly 4 characters per token.
+func _dump_group_payload(id: String, messages: Array) -> void:
+	var c := get_character(id)
+	var total := 0
+	for msg in messages:
+		total += String(msg["content"]).length()
+
+	print("\n===== GROUP PROMPT -> %s =====" % String(c.get("name", id)))
+	print("%d messages, %d chars (~%d tokens), num_ctx=%d" % [messages.size(), total, int(total / 4.0), OLLAMA_NUM_CTX])
+	for i in range(messages.size()):
+		var msg: Dictionary = messages[i]
+		var content := String(msg["content"]).replace("\n", " | ")
+		if content.length() > 220:
+			content = content.substr(0, 220) + "..."
+		print("[%2d] (%2d back) %9s: %s" % [i, messages.size() - i, String(msg["role"]), content])
+	print("===== end =====\n")
+
+
+## Strips a "Marcus:" / "Marcus Sterling:" / "**Marcus**:" style speaker label
+## off the front of a reply. Small models reliably prefix their own name in
+## multi-party scenes no matter how firmly the prompt asks them not to, and
+## the UI already prints the speaker itself.
+func _strip_speaker_prefix(text: String, id: String) -> String:
+	var c := get_character(id)
+	if c.is_empty():
+		return text
+	var candidates := [String(c["name"]), String(c["short"]), String(c["first_name"])]
+	var parts := String(c["name"]).replace('"', "").split(" ")
+	for p in parts:
+		candidates.append(String(p))
+
+	var out := text.strip_edges()
+	# Loop, because a stubborn model can produce '**Marcus Sterling:** Marcus:'.
+	for _pass in range(2):
+		var trimmed := out.lstrip("*_ \t")
+		for cand in candidates:
+			if cand.length() < 2:
+				continue
+			if trimmed.begins_with(cand + ":") or trimmed.begins_with(cand + "**:") or trimmed.begins_with(cand + ":**"):
+				var idx := trimmed.find(":")
+				out = trimmed.substr(idx + 1).lstrip("* \t").strip_edges()
+				break
+	return _strip_wrapping_quotes(out)
+
+
+## Removes quotation marks around a whole reply. Group scenes quote every line
+## in the narrated block they read ('X said out loud: "..."'), so the model
+## copies the convention and hands its own line back quoted - which then gets
+## printed with quotes the one-on-one dialogue never has. Only strips when the
+## quotes genuinely wrap the entire reply, so a line that quotes someone else
+## partway through is left alone.
+func _strip_wrapping_quotes(text: String) -> String:
+	var t := text.strip_edges()
+	while t.length() >= 2:
+		var first := t.substr(0, 1)
+		var last := t.substr(t.length() - 1, 1)
+		var is_pair := (first == "\"" and last == "\"") or (first == "'" and last == "'")
+		is_pair = is_pair or (first == "“" and last == "”")
+		if not is_pair:
+			break
+		var inner := t.substr(1, t.length() - 2)
+		# Bail out if the inner text still has an unbalanced quote of the same
+		# kind - that means the outer pair wasn't a wrapper after all.
+		if inner.count(first) != inner.count(last):
+			break
+		t = inner.strip_edges()
+	return t
 
 
 ## All the Q&A transcript entries for one character, in the order they
@@ -291,10 +576,45 @@ func get_transcript_for(character_id: String) -> Array:
 	return out
 
 
-## True if this character has been talked to since their case-notes summary
-## was last generated (or has never been summarized at all).
+## How many transcript entries feed this suspect's case notes: their own lines,
+## plus anything another suspect said out loud in front of them. The second
+## part matters because hearing someone else's account in the Hall can put this
+## suspect in contradiction without them saying another word - so their notes
+## need refreshing when it happens.
+func summary_source_count(character_id: String) -> int:
+	var count := 0
+	for e in transcript:
+		if e["character_id"] == character_id:
+			count += 1
+		elif String(e.get("scene", "")) == "group" and Array(e.get("heard_by", [])).has(character_id):
+			count += 1
+	return count
+
+
+## Everything relevant to one suspect's case notes, in the order it happened -
+## their own answers, and the other guests' Hall lines they were standing
+## there for.
+func summary_sources(character_id: String) -> Array:
+	var out := []
+	for e in transcript:
+		if e["character_id"] == character_id:
+			out.append(e)
+		elif String(e.get("scene", "")) == "group" and Array(e.get("heard_by", [])).has(character_id):
+			out.append(e)
+	return out
+
+
+## True if there's anything at all in this suspect's case file - their own
+## answers, or something they stood and listened to in the Hall.
+func has_notes(character_id: String) -> bool:
+	return summary_source_count(character_id) > 0
+
+
+## True if this character's notes are out of date - either they've said
+## something since the last summary, or they've heard something new said about
+## them in the Hall.
 func needs_summary_refresh(character_id: String) -> bool:
-	var count := get_transcript_for(character_id).size()
+	var count := summary_source_count(character_id)
 	if count == 0:
 		return false
 	return count > int(_summarized_at.get(character_id, 0))
@@ -308,30 +628,35 @@ func get_summary(character_id: String) -> Dictionary:
 	return _summaries.get(character_id, {})
 
 
-## Ask the model to distill everything a suspect has said so far into three
-## labeled case-notes sections - Timeline, Motive, and Slipups - separate
-## from that suspect's own in-character roleplay memory, so it doesn't
+## Ask the model to distill everything a suspect has said so far into four
+## labeled case-notes sections - Timeline, Motive, Slipups and Contradictions -
+## separate from that suspect's own in-character roleplay memory, so it doesn't
 ## pollute what they "remember" saying. Arrives via summary_ready / summary_error.
 func request_summary(character_id: String) -> void:
-	var entries := get_transcript_for(character_id)
+	var entries := summary_sources(character_id)
 	if entries.is_empty():
 		return
 	var c := get_character(character_id)
 	if c.is_empty():
 		return
 
-	var convo := ""
-	for e in entries:
-		convo += "Detective: %s\n%s: %s\n\n" % [e["question"], c["short"], e["answer"]]
+	var convo := _build_summary_transcript(character_id, entries)
 
 	var sys_prompt := ""
 	sys_prompt += "You are a detective's case-notes assistant in a murder-mystery game called Archibald Manor. "
-	sys_prompt += "Below is the full interview transcript so far between the detective and a suspect named %s (%s). " % [c["name"], c["job"]]
-	sys_prompt += "Organize what this suspect has revealed into exactly three sections. Respond using EXACTLY this "
-	sys_prompt += "format and these three markers, in this order, with nothing before, between, or after them:\n\n"
+	sys_prompt += "Below is the full record so far for a suspect named %s (%s). " % [c["name"], c["job"]]
+	sys_prompt += "Lines marked 'Detective:' are private questions and the lines under them are %s's own answers. " % String(c["short"])
+	sys_prompt += "Lines marked '[In the hall...]' were spoken out loud in front of the other guests named there. "
+	sys_prompt += "Lines marked '[In the hall, overheard]' were said by a DIFFERENT guest while %s was standing there listening - " % String(c["short"])
+	sys_prompt += "those are not %s's own words, but %s heard them.\n\n" % [String(c["short"]), String(c["short"])]
+	sys_prompt += "Organize this into exactly four sections. Respond using EXACTLY this "
+	sys_prompt += "format and these four markers, in this order, with nothing before, between, or after them:\n\n"
 	sys_prompt += "##TIMELINE##\n- their claimed whereabouts/alibi/account of events around the time of the murder\n"
 	sys_prompt += "##MOTIVE##\n- any possible reason they might have had to kill the victim - grudges, money, secrets, relationships\n"
-	sys_prompt += "##SLIPUPS##\n- anything suspicious, evasive, defensive, inconsistent, or contradictory in how they answered\n\n"
+	sys_prompt += "##SLIPUPS##\n- anything suspicious, evasive, defensive, or inconsistent in how they answered\n"
+	sys_prompt += "##CONTRADICTIONS##\n- specific points where this suspect's account conflicts with something ANOTHER guest "
+	sys_prompt += "said in front of them, or where their public story in the hall differs from what they said privately. "
+	sys_prompt += "Name the other guest and both versions.\n\n"
 	sys_prompt += "Under each marker, write 1-3 short bullet points starting with '- '. If a section has nothing "
 	sys_prompt += "relevant yet, write a single bullet '- Nothing notable yet.' under that marker instead of leaving "
 	sys_prompt += "it blank. Be objective and third-person. Completely ignore small talk and pleasantries."
@@ -343,9 +668,71 @@ func request_summary(character_id: String) -> void:
 			{"role": "user", "content": convo},
 		],
 		"stream": false,
-		"options": {"num_predict": SUMMARY_MAX_TOKENS, "temperature": 0.4},
+		"options": {"num_predict": SUMMARY_MAX_TOKENS, "temperature": 0.4, "num_ctx": OLLAMA_NUM_CTX},
 	}
 	_enqueue({"kind": "summary", "character_id": character_id, "entry_count": entries.size(), "body": body})
+
+
+## Renders the transcript that gets summarized for one suspect. Three shapes
+## of line, deliberately distinguishable:
+##
+##   Detective: ...              a private question
+##   Marcus: ...                 the subject's own answer
+##   [In the hall, in front of Evelyn and Eleanor]
+##   Marcus: ...                 the subject speaking publicly
+##   [In the hall] Eleanor: ...  another guest, with the subject listening
+##
+## Where a claim was made is evidence in itself: a story told privately and
+## then told differently in front of witnesses is exactly the contradiction the
+## detective is hunting for, and the summarizer can only catch it if the two
+## are told apart. The last shape is what makes cross-suspect contradictions
+## findable at all - without it, each suspect is summarized in isolation and
+## nothing can ever disagree.
+func _build_summary_transcript(character_id: String, entries: Array) -> String:
+	var subject := get_character(character_id)
+	var subject_short := String(subject.get("short", "They"))
+	var convo := ""
+	var last_question := ""
+
+	for e in entries:
+		var is_group := String(e.get("scene", "")) == "group"
+		var speaker_id := String(e["character_id"])
+		var question := String(e.get("question", ""))
+
+		if speaker_id == character_id:
+			if is_group:
+				var witnesses := _name_list(Array(e.get("heard_by", [])))
+				if question != "" and question != last_question:
+					convo += "Detective (to the room): %s\n" % question
+					last_question = question
+				convo += "[In the hall, in front of %s]\n%s: %s\n\n" % [witnesses, subject_short, e["answer"]]
+			else:
+				convo += "Detective: %s\n%s: %s\n\n" % [question, subject_short, e["answer"]]
+				last_question = question
+		else:
+			# Someone else talking in front of this suspect.
+			var other := get_character(speaker_id)
+			if question != "" and question != last_question:
+				convo += "Detective (to the room): %s\n" % question
+				last_question = question
+			convo += "[In the hall, overheard] %s: %s\n\n" % [String(other.get("short", "Someone")), e["answer"]]
+
+	return convo
+
+
+## "Evelyn and Eleanor" / "Evelyn, Marcus and Eleanor" - used for witness lists.
+func _name_list(ids: Array) -> String:
+	var names := []
+	for id in ids:
+		var c := get_character(id)
+		if not c.is_empty():
+			names.append(String(c["short"]))
+	if names.is_empty():
+		return "no one else"
+	if names.size() == 1:
+		return String(names[0])
+	var head: Array = names.slice(0, names.size() - 1)
+	return "%s and %s" % [", ".join(PackedStringArray(head)), String(names[names.size() - 1])]
 
 
 ## Splits a "##TIMELINE##...##MOTIVE##...##SLIPUPS##..." response into a
@@ -353,7 +740,7 @@ func request_summary(character_id: String) -> void:
 ## empty Dictionary if none of the markers were found at all (caller falls
 ## back to raw Q&A in that case).
 func _parse_summary_sections(text: String) -> Dictionary:
-	var markers := [["##TIMELINE##", "timeline"], ["##MOTIVE##", "motive"], ["##SLIPUPS##", "slipups"]]
+	var markers := [["##TIMELINE##", "timeline"], ["##MOTIVE##", "motive"], ["##SLIPUPS##", "slipups"], ["##CONTRADICTIONS##", "contradictions"]]
 	var positions := []
 	for m in markers:
 		positions.append(text.find(m[0]))
@@ -408,6 +795,8 @@ func _emit_failure(item: Dictionary, message: String) -> void:
 		ollama_error.emit(character_id, message)
 	elif kind == "summary":
 		summary_error.emit(character_id, message)
+	elif kind == "group":
+		group_error.emit(character_id, message, int(item.get("token", 0)))
 
 
 func _on_request_completed(result: int, response_code: int, _headers: PackedStringArray, body: PackedByteArray) -> void:
@@ -448,11 +837,30 @@ func _on_request_completed(result: int, response_code: int, _headers: PackedStri
 		var q := String(item.get("question", ""))
 		_histories[character_id].append({"role": "assistant", "content": content})
 		transcript.append({"character_id": character_id, "question": q, "answer": content})
+		_refresh_dialogue_log()
 		ollama_response.emit(character_id, content)
 	elif kind == "summary":
 		_summaries[character_id] = _parse_summary_sections(content)
 		_summarized_at[character_id] = int(item.get("entry_count", 0))
 		summary_ready.emit(character_id, content)
+	elif kind == "group":
+		var spoken := _strip_speaker_prefix(content, character_id)
+		if spoken == "":
+			_emit_failure(item, "That suspect said nothing usable. Try again.")
+			_process_queue()
+			return
+		# Stored without the speaker prefix so their own memory of what they
+		# said matches what the room actually heard.
+		_histories[character_id].append({"role": "assistant", "content": spoken})
+		transcript.append({
+			"character_id": character_id,
+			"question": String(item.get("player_line", "")),
+			"answer": spoken,
+			"scene": "group",
+			"heard_by": item.get("witnesses", []),
+		})
+		_refresh_dialogue_log()
+		group_response.emit(character_id, spoken, int(item.get("token", 0)))
 
 	_process_queue()
 

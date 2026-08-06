@@ -11,6 +11,22 @@ const WALL_H := 3.0
 const WALL_T := 0.4
 const DOOR_W := 3.0
 
+# The Hall doubles as the meetup room: suspects ordered there gather for a
+# group confrontation.
+#
+# The cap counts SUSPECTS, not people - the detective is never an attendee - so
+# 2 means a three-handed scene: you and two of them. That's deliberately the
+# whole format. A two-hander is the sharpest possible confrontation (one
+# accuses, one defends, you referee), a round costs only two sequential Ollama
+# calls instead of four, and each suspect's memory fills half as fast. It also
+# halves the number of other names in the room that a small model can mistake
+# for the detective, which is the failure that kept surfacing at four.
+#
+# Raise this back to 4 for bigger, messier confrontations - nothing else
+# depends on the value.
+const MEETUP_ROOM := "Hall"
+const MAX_HALL_ATTENDEES := 2
+
 # 3x3 layout. Hall (front door + player spawn) sits at the front-center so
 # the front door can face the exterior.
 const GRID := [
@@ -61,6 +77,16 @@ var room_name_lookup: Dictionary = {} # lowercase room name -> canonical room na
 var move_command_regex: RegEx = null
 var wait_command_regex: RegEx = null
 
+# Floor-control orders typed into the Hall meetup box - "Marcus, be quiet",
+# "everyone except Eleanor stay quiet", "Tom, you can go". Detected locally
+# the same way movement commands are, so an order to the room never costs an
+# Ollama round-trip and never gets answered in character.
+var group_silence_regex: RegEx = null
+var group_speak_regex: RegEx = null
+var group_leave_regex: RegEx = null
+var group_everyone_regex: RegEx = null
+var group_except_regex: RegEx = null
+
 var ui_layer: CanvasLayer
 var crosshair: ColorRect
 var prompt_label: Label
@@ -72,6 +98,16 @@ var dialogue_input: LineEdit
 var dialogue_ask_button: Button
 var dialogue_status_label: Label
 var current_dialogue_character: String = ""
+
+# Hall meetup panel - the group confrontation. The turn logic itself lives in
+# GameManager.group_chat (Scripts/GroupChat.gd); everything here is UI.
+var group_panel: Panel
+var group_roster: HBoxContainer
+var group_log: RichTextLabel
+var group_input: LineEdit
+var group_say_button: Button
+var group_status_label: Label
+var group_frozen_ids: Array = [] # attendees currently held still by the open scene
 
 var accusation_panel: Panel
 var accusation_suspect_buttons: Dictionary = {} # character_id -> Button
@@ -97,6 +133,7 @@ var selection_layer: CanvasLayer
 var selection_checkboxes: Dictionary = {} # character_id -> CheckBox
 var selection_count_label: Label
 var selection_start_button: Button
+var selection_log_checkbox: CheckBox
 
 
 func _ready() -> void:
@@ -106,8 +143,16 @@ func _ready() -> void:
 	GameManager.summary_ready.connect(_on_summary_ready)
 	GameManager.summary_error.connect(_on_summary_error)
 
+	GameManager.group_chat.line_added.connect(_on_group_line_added)
+	GameManager.group_chat.turn_started.connect(_on_group_turn_started)
+	GameManager.group_chat.state_changed.connect(_on_group_state_changed)
+	GameManager.group_chat.round_failed.connect(_on_group_round_failed)
+	GameManager.group_chat.roster_changed.connect(_on_group_roster_changed)
+	GameManager.group_chat.quorum_lost.connect(_on_group_quorum_lost)
+
 	_build_room_name_lookup()
 	_build_move_command_regexes()
+	_build_group_command_regexes()
 
 	# The mouse may still be captured (MOUSE_MODE_CAPTURED) from a previous
 	# game if this is a "Play Again" scene reload - make sure it's free so
@@ -217,6 +262,19 @@ func _build_selection_screen() -> void:
 	selection_count_label = Label.new()
 	vbox.add_child(selection_count_label)
 
+	selection_log_checkbox = CheckBox.new()
+	selection_log_checkbox.text = "Write a dialogue log for this session (testing)"
+	selection_log_checkbox.button_pressed = GameManager.dialogue_log_enabled
+	selection_log_checkbox.tooltip_text = "Saves every line every suspect says to a markdown file in DialogueLogs/, alongside the game's ground truth, for reviewing hallucinations afterwards."
+	vbox.add_child(selection_log_checkbox)
+
+	var log_hint := Label.new()
+	log_hint.text = "Saved to DialogueLogs/ next to the project. The exact path is printed to the output console when the game starts."
+	log_hint.autowrap_mode = TextServer.AUTOWRAP_WORD
+	log_hint.add_theme_font_size_override("font_size", 12)
+	log_hint.add_theme_color_override("font_color", Color(1, 1, 1, 0.55))
+	vbox.add_child(log_hint)
+
 	var button_row := HBoxContainer.new()
 	button_row.add_theme_constant_override("separation", 10)
 	vbox.add_child(button_row)
@@ -282,6 +340,12 @@ func _on_start_pressed() -> void:
 	if selected_ids.size() < 2:
 		return
 
+	# Read before the selection screen is freed, and set before start_new_game()
+	# below - that's where the session's log file is created.
+	if selection_log_checkbox != null:
+		GameManager.dialogue_log_enabled = selection_log_checkbox.button_pressed
+	selection_log_checkbox = null
+
 	selection_layer.queue_free()
 	selection_layer = null
 	_start_game(selected_ids)
@@ -294,6 +358,9 @@ func _unhandled_input(event: InputEvent) -> void:
 		if dialogue_panel and dialogue_panel.visible:
 			close_dialogue()
 			get_viewport().set_input_as_handled()
+		elif group_panel and group_panel.visible:
+			close_group_dialogue()
+			get_viewport().set_input_as_handled()
 		elif accusation_panel and accusation_panel.visible:
 			close_accusation()
 			get_viewport().set_input_as_handled()
@@ -301,10 +368,13 @@ func _unhandled_input(event: InputEvent) -> void:
 			toggle_notes()
 			get_viewport().set_input_as_handled()
 	elif event.is_action_pressed("toggle_notes"):
-		if not (dialogue_panel.visible or accusation_panel.visible):
+		if not (dialogue_panel.visible or group_panel.visible or accusation_panel.visible):
 			toggle_notes()
 	elif event.is_action_pressed("toggle_debug"):
 		toggle_debug()
+	elif event.is_action_pressed("toggle_prompt_dump"):
+		GameManager.debug_dump_group = not GameManager.debug_dump_group
+		print("[DEBUG] Group prompt dump %s - the next line spoken in a hall meetup will print its full payload." % ("ON" if GameManager.debug_dump_group else "OFF"))
 
 
 # ---------------------------------------------------------------- geometry --
@@ -564,6 +634,157 @@ func _parse_move_command(text: String) -> String:
 	return String(room_name_lookup.get(m.get_string(1).to_lower(), ""))
 
 
+## Builds the five regexes behind the Hall meetup's floor-control orders. Kept
+## as separate intent patterns (silence / speak / leave / everyone / except)
+## rather than one big pattern per command, so the parser can combine them -
+## "everyone be quiet except Marcus" is the everyone pattern plus the silence
+## pattern plus the except pattern, with no dedicated rule of its own.
+func _build_group_command_regexes() -> void:
+	group_silence_regex = RegEx.new()
+	group_silence_regex.compile("(?i)\\b(?:be\\s+quiet|keep\\s+quiet|stay\\s+quiet|quiet\\s+down|say\\s+nothing|don't\\s+speak|do\\s+not\\s+speak|don't\\s+say|stop\\s+talking|hold\\s+your\\s+tongue|shut\\s+up|silence|silent)\\b")
+
+	group_speak_regex = RegEx.new()
+	group_speak_regex.compile("(?i)\\b(?:may\\s+speak|can\\s+speak|speak\\s+up|speak\\s+now|speak\\s+freely|go\\s+ahead|your\\s+turn|you\\s+may\\s+answer|answer\\s+me|say\\s+something|talk\\s+again|speak)\\b")
+
+	# "Leave" also covers being sent home, since dismissal already walks a
+	# suspect back to their own starting room - "go back to your room" and
+	# "leave" want the same thing to happen.
+	group_leave_regex = RegEx.new()
+	group_leave_regex.compile("(?i)\\b(?:leave|get\\s+out|step\\s+out|you\\s+can\\s+go|you\\s+may\\s+go|you're\\s+dismissed|dismissed|clear\\s+off|wait\\s+outside|go\\s+home|(?:go\\s+|head\\s+)?back\\s+to\\s+(?:your|their|his|her)\\s+(?:own\\s+)?rooms?|return\\s+to\\s+(?:your|their|his|her)\\s+(?:own\\s+)?rooms?)\\b")
+
+	group_everyone_regex = RegEx.new()
+	group_everyone_regex.compile("(?i)\\b(?:everyone|everybody|all\\s+of\\s+you|the\\s+room|nobody|no\\s+one)\\b")
+
+	group_except_regex = RegEx.new()
+	group_except_regex.compile("(?i)\\b(?:except|apart\\s+from|other\\s+than|but)\\b\\s+(.+)$")
+
+
+## Classifies a line typed into the meetup box. Returns {"kind": ..., "id": ...}
+## where kind is one of:
+##   "none"               ordinary line to the room - everyone un-muted answers
+##   "address"            aimed at one named suspect - only they answer
+##   "mute" / "unmute"    floor control for one suspect
+##   "silence_all"        shut the whole room up
+##   "silence_all_except" shut everyone up but one
+##   "unmute_all"         let the room speak again
+##   "dismiss"            send a suspect out of the Hall
+func _parse_group_command(text: String) -> Dictionary:
+	var none := {"kind": "none", "id": ""}
+	if group_silence_regex == null:
+		return none
+
+	# A question is never an order, matching how _parse_move_command treats
+	# "Did you go to the kitchen?" as something to ask rather than something to
+	# do. Without this, "Marcus, why were you so quiet last night?" silences him
+	# instead of asking him. Note this only suppresses ORDERS - a question
+	# beginning with a name is still routed to that suspect below, since
+	# "Marcus, where were you?" is the single most common thing you'll type.
+	var is_order := text.find("?") == -1
+
+	# Room-wide orders are checked first: "everyone be quiet except Marcus"
+	# also starts with no suspect's name, so it would otherwise fall through to
+	# the name-prefix branch and be treated as an ordinary question.
+	if is_order and group_everyone_regex.search(text) != null:
+		# Silence is tested before speech because the silence phrasings contain
+		# the word "speak" ("don't speak", "do not speak") and would otherwise
+		# be read as permission to talk.
+		if group_silence_regex.search(text) != null:
+			var ex := group_except_regex.search(text)
+			if ex != null:
+				var ex_id := _find_attendee_in(ex.get_string(1))
+				if ex_id != "":
+					return {"kind": "silence_all_except", "id": ex_id}
+			return {"kind": "silence_all", "id": ""}
+		# "Everyone, back to your rooms" - the one order you always need at the
+		# end of a confrontation, and the only way to clear the Hall in one go.
+		if group_leave_regex.search(text) != null:
+			return {"kind": "dismiss_all", "id": ""}
+		if group_speak_regex.search(text) != null:
+			return {"kind": "unmute_all", "id": ""}
+
+	# Everything else must be addressed to someone by name, at the START of the
+	# line. "Marcus, where were you?" is aimed at Marcus; "Where were you,
+	# Marcus?" is a question to the room that happens to mention him. Requiring
+	# the leading position keeps that distinction predictable instead of having
+	# any stray mention hijack the round.
+	var lead := _leading_attendee(text)
+	var id := String(lead["id"])
+	if id == "":
+		# No name at the front, but if the line mentions exactly one person in
+		# the room it's still aimed at them - "what about you, Tom?" obviously
+		# wants Tom, not a full round of everyone. Requiring the name to lead
+		# was too strict and made ordinary phrasing silently address the room.
+		# Two or more names stays room-wide, since "Marcus, is Tom lying?"
+		# genuinely is ambiguous about who should answer.
+		var named := _attendees_named_in(text)
+		if named.size() == 1:
+			return {"kind": "address", "id": String(named[0])}
+		return none
+
+	if is_order:
+		var rest := text.substr(int(lead["end"])).strip_edges().lstrip(",:;-. \t")
+		if group_leave_regex.search(rest) != null:
+			return {"kind": "dismiss", "id": id}
+		# "Marcus, go to the library" - the same movement command that works in
+		# a private conversation, which previously did nothing in here and got
+		# answered in character instead.
+		var room := _parse_move_command(rest)
+		if room != "" and room != MEETUP_ROOM:
+			return {"kind": "move", "id": id, "room": room}
+		if group_silence_regex.search(rest) != null:
+			return {"kind": "mute", "id": id}
+		if group_speak_regex.search(rest) != null:
+			return {"kind": "unmute", "id": id}
+	return {"kind": "address", "id": id}
+
+
+## Every attendee mentioned anywhere in `text`, in seating order. Used to work
+## out whether a line singles someone out.
+func _attendees_named_in(text: String) -> Array:
+	var out := []
+	for id in GameManager.group_chat.attendees:
+		if not name_regexes.has(id):
+			continue
+		if name_regexes[id].search(text) != null:
+			out.append(id)
+	return out
+
+
+## The attendee whose name appears earliest in `text`, or "" if none do.
+func _find_attendee_in(text: String) -> String:
+	var best := ""
+	var best_pos := -1
+	for id in GameManager.group_chat.attendees:
+		if not name_regexes.has(id):
+			continue
+		var m: RegExMatch = name_regexes[id].search(text)
+		if m == null:
+			continue
+		if best_pos == -1 or m.get_start() < best_pos:
+			best_pos = m.get_start()
+			best = id
+	return best
+
+
+## The attendee named at the very start of `text`, as {"id", "end"} where end
+## is the character offset just past their name. Longest match wins, so
+## "Marcus Sterling, ..." consumes the surname too instead of leaving it in
+## the remainder and confusing the intent match.
+func _leading_attendee(text: String) -> Dictionary:
+	var best_id := ""
+	var best_end := 0
+	for id in GameManager.group_chat.attendees:
+		if not name_regexes.has(id):
+			continue
+		var m: RegExMatch = name_regexes[id].search(text)
+		if m == null or m.get_start() != 0:
+			continue
+		if m.get_end() > best_end:
+			best_end = m.get_end()
+			best_id = id
+	return {"id": best_id, "end": best_end}
+
+
 ## Shortest path (in room names, excluding `from_room`) between two rooms
 ## over the 3x3 GRID, treating every orthogonally adjacent pair of rooms as
 ## connected (every internal wall in the mansion has a doorway gap - see
@@ -636,15 +857,87 @@ func get_room_travel_waypoints(from_room: String, to_room: String) -> Array:
 	return waypoints
 
 
+# ------------------------------------------------------------- hall meetup --
+# Suspects are gathered for a group confrontation one at a time, by telling
+# each of them "go to the hall" during a normal one-on-one conversation.
+# MAX_HALL_ATTENDEES caps how many will agree to crowd in there.
+
+## How many suspects currently count against the Hall's capacity. Deliberately
+## counts NPCs still walking there as well as those already standing in it -
+## begin_travel() sets current_room to the destination immediately, so an NPC
+## sent to the Hall occupies a slot from the moment they're ordered. Without
+## this you could order six suspects to the Hall in a row (each one passing the
+## capacity check while the previous ones are still in the corridors) and end
+## up with all six arriving.
+func hall_occupancy() -> int:
+	var count := 0
+	for id in npc_nodes.keys():
+		var npc = npc_nodes[id]
+		if is_instance_valid(npc) and npc.current_room == MEETUP_ROOM:
+			count += 1
+	return count
+
+
+## The suspects actually standing in the Hall right now - arrived, not still
+## en route. This is the guest list for a group confrontation, so it excludes
+## anyone still walking (state == "moving"); hall_occupancy() is the one that
+## counts those. Returned in stable CHARACTERS order rather than spawn or
+## arrival order, matching active_characters().
+func hall_attendees() -> Array:
+	var out := []
+	for c in GameManager.active_characters():
+		var id: String = c["id"]
+		if not npc_nodes.has(id):
+			continue
+		var npc = npc_nodes[id]
+		if is_instance_valid(npc) and npc.current_room == MEETUP_ROOM and npc.state != "moving":
+			out.append(id)
+	return out
+
+
+## Which room a world-space point sits in, by nearest room center. The 3x3
+## grid is evenly spaced and every room is the same size, so nearest-center is
+## exactly equivalent to a cell lookup here, without duplicating the PITCH/CELL
+## arithmetic that _build_mansion() already owns.
+func _room_at(pos: Vector3) -> String:
+	var best := ""
+	var best_d := INF
+	for rname in room_centers.keys():
+		var c: Vector3 = room_centers[rname]
+		var d := Vector2(pos.x - c.x, pos.z - c.z).length_squared()
+		if d < best_d:
+			best_d = d
+			best = rname
+	return best
+
+
+## True when the interact key should open a group confrontation rather than a
+## private interview: the detective is standing in the Hall and at least two
+## suspects have actually arrived there. This is the "I must be there to engage
+## the conversation" rule - a meetup cannot be opened, and therefore cannot
+## produce a single line of dialogue, from anywhere else in the mansion.
+func can_open_group_scene() -> bool:
+	if not is_instance_valid(player):
+		return false
+	if _room_at(player.global_position) != MEETUP_ROOM:
+		return false
+	return hall_attendees().size() >= 2
+
+
 ## Sends an NPC walking toward `room_name`. Returns a status string Main uses
 ## to write a short acknowledgement into the dialogue log: "moving",
-## "already_there", "already_heading", or "invalid" (unknown character/room).
+## "already_there", "already_heading", "hall_full" (the meetup room has hit
+## MAX_HALL_ATTENDEES), or "invalid" (unknown character/room).
 func command_npc_move(character_id: String, room_name: String) -> String:
 	if not npc_nodes.has(character_id) or not room_centers.has(room_name):
 		return "invalid"
 	var npc = npc_nodes[character_id]
 	if npc.current_room == room_name:
 		return "already_heading" if npc.state == "moving" else "already_there"
+	# Checked after the already-there cases above, so an NPC who is themselves
+	# in the Hall is never blocked by their own occupancy slot.
+	if room_name == MEETUP_ROOM and hall_occupancy() >= MAX_HALL_ATTENDEES:
+		return "hall_full"
 	var waypoints := get_room_travel_waypoints(npc.current_room, room_name)
 	if waypoints.is_empty():
 		return "invalid"
@@ -667,6 +960,8 @@ func _handle_move_command(character_id: String, room_name: String, original_text
 			ack = "%s is already in the %s." % [short, room_name]
 		"already_heading":
 			ack = "%s is already on the way to the %s." % [short, room_name]
+		"hall_full":
+			ack = "%s glances toward the hall. \"There's a crowd in there already - I'll wait my turn.\"" % short
 		_:
 			ack = "%s doesn't seem able to get there." % short
 	dialogue_log.append_text("[b]You:[/b] %s\n" % _colorize_names(original_text))
@@ -735,7 +1030,7 @@ func _build_ui() -> void:
 	ui_layer.add_child(prompt_label)
 
 	var help := Label.new()
-	help.text = "WASD move | Space jump | Mouse look | Click or E to interact | Tab case notes | F1 debug | Esc release mouse"
+	help.text = "WASD move | Space jump | Mouse look | Click or E to interact | Tab case notes | F1 debug | F2 prompt dump | Esc release mouse"
 	help.set_anchors_preset(Control.PRESET_TOP_LEFT)
 	help.position = Vector2(16, 16)
 	help.add_theme_font_size_override("font_size", 14)
@@ -757,6 +1052,7 @@ func _build_ui() -> void:
 	ui_layer.add_child(debug_label)
 
 	_build_dialogue_panel()
+	_build_group_panel()
 	_build_accusation_panel()
 	_build_notes_panel()
 	_build_win_panel()
@@ -812,6 +1108,68 @@ func _build_dialogue_panel() -> void:
 	close_btn.text = "Close (Esc)"
 	close_btn.pressed.connect(close_dialogue)
 	vbox.add_child(close_btn)
+
+
+## The Hall meetup panel. Deliberately wider than the one-on-one panel: group
+## lines are short but there are several per round, and each is prefixed with
+## a speaker name, so the log needs the extra room to stay readable.
+func _build_group_panel() -> void:
+	group_panel = Panel.new()
+	group_panel.set_anchors_preset(Control.PRESET_CENTER)
+	group_panel.size = Vector2(720, 480)
+	group_panel.position = Vector2(-360, -240)
+	group_panel.visible = false
+	ui_layer.add_child(group_panel)
+
+	var vbox := VBoxContainer.new()
+	vbox.set_anchors_preset(Control.PRESET_FULL_RECT)
+	vbox.offset_left = 16
+	vbox.offset_top = 16
+	vbox.offset_right = -16
+	vbox.offset_bottom = -16
+	vbox.add_theme_constant_override("separation", 8)
+	group_panel.add_child(vbox)
+
+	var title := Label.new()
+	title.text = "The Hall"
+	title.add_theme_font_size_override("font_size", 22)
+	vbox.add_child(title)
+
+	# One name chip per attendee, in that suspect's own body color, so the log
+	# below reads against a visible cast list.
+	group_roster = HBoxContainer.new()
+	group_roster.add_theme_constant_override("separation", 14)
+	vbox.add_child(group_roster)
+
+	group_log = RichTextLabel.new()
+	group_log.custom_minimum_size = Vector2(0, 290)
+	group_log.bbcode_enabled = true
+	group_log.scroll_following = true
+	vbox.add_child(group_log)
+
+	group_status_label = Label.new()
+	group_status_label.text = ""
+	group_status_label.add_theme_color_override("font_color", Color(1, 0.8, 0.3))
+	vbox.add_child(group_status_label)
+
+	var hbox := HBoxContainer.new()
+	vbox.add_child(hbox)
+
+	group_input = LineEdit.new()
+	group_input.placeholder_text = "Say something to the room..."
+	group_input.custom_minimum_size = Vector2(580, 0)
+	group_input.text_submitted.connect(func(_t): _send_group_line())
+	hbox.add_child(group_input)
+
+	group_say_button = Button.new()
+	group_say_button.text = "Say"
+	group_say_button.pressed.connect(_send_group_line)
+	hbox.add_child(group_say_button)
+
+	var group_close_btn := Button.new()
+	group_close_btn.text = "Leave the room (Esc)"
+	group_close_btn.pressed.connect(close_group_dialogue)
+	vbox.add_child(group_close_btn)
 
 
 func _build_accusation_panel() -> void:
@@ -1186,6 +1544,10 @@ func hide_prompt() -> void:
 func open_dialogue(character_id: String) -> void:
 	if win_panel.visible:
 		return
+	# Taking one suspect aside ends the confrontation - the others go back to
+	# wandering rather than standing frozen in the hall unattended.
+	if group_panel != null and group_panel.visible:
+		close_group_dialogue()
 	# If some other suspect was somehow still held, release them first.
 	_set_npc_talking(current_dialogue_character, false)
 	current_dialogue_character = character_id
@@ -1228,10 +1590,293 @@ func _set_npc_talking(character_id: String, talking: bool) -> void:
 		npc.set_talking(talking)
 
 
+# ---------------------------------------------------------- hall meetup UI --
+
+## Opens a group confrontation with everyone standing in the Hall. Falls back
+## to a normal one-on-one if there's only one suspect in there.
+func open_group_dialogue() -> void:
+	if win_panel.visible:
+		return
+	var ids := hall_attendees()
+	if ids.size() < 2:
+		if ids.size() == 1:
+			open_dialogue(String(ids[0]))
+		return
+
+	close_dialogue()
+	_set_group_frozen(ids, true)
+
+	group_log.clear()
+	group_status_label.text = ""
+	group_input.editable = true
+	group_say_button.disabled = false
+	group_panel.visible = true
+	player.set_mouse_captured(false)
+	group_input.grab_focus()
+
+	# Started before the roster is drawn so the guest list and mute state the
+	# buttons read from are the session's, not the previous scene's leftovers.
+	GameManager.group_chat.start(ids)
+	_rebuild_group_roster(ids)
+
+
+func close_group_dialogue() -> void:
+	GameManager.group_chat.stop()
+	group_panel.visible = false
+	_set_group_frozen(group_frozen_ids, false)
+	if is_instance_valid(player):
+		player.set_mouse_captured(true)
+
+
+## Holds every attendee still (facing the detective) for the duration of the
+## scene, or releases them. Tracks who was frozen so the release can't miss
+## someone who has since left the Hall.
+func _set_group_frozen(ids: Array, frozen: bool) -> void:
+	if frozen:
+		group_frozen_ids = ids.duplicate()
+	for id in ids:
+		if not npc_nodes.has(id):
+			continue
+		var npc = npc_nodes[id]
+		if not is_instance_valid(npc):
+			continue
+		if frozen and is_instance_valid(player):
+			npc.set_group_scene(true, player.global_position)
+		else:
+			npc.set_group_scene(false)
+	if not frozen:
+		group_frozen_ids.clear()
+
+
+## One chip per attendee: their name in their own body color, plus a button
+## that silences or restores them. The button and the typed order ("Marcus, be
+## quiet") call exactly the same engine method, so the two can never disagree.
+func _rebuild_group_roster(ids: Array) -> void:
+	for child in group_roster.get_children():
+		group_roster.remove_child(child)
+		child.queue_free()
+
+	var gc = GameManager.group_chat
+	for id in ids:
+		var c := GameManager.get_character(id)
+		var silent: bool = gc.is_muted(id)
+
+		var col := VBoxContainer.new()
+		col.add_theme_constant_override("separation", 2)
+		group_roster.add_child(col)
+
+		var chip := Label.new()
+		chip.text = String(c.get("short", ""))
+		chip.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		chip.add_theme_font_size_override("font_size", 16)
+		var name_col: Color = NPC_COLORS.get(id, Color.WHITE)
+		if silent:
+			name_col = name_col.darkened(0.45)
+		chip.add_theme_color_override("font_color", name_col)
+		col.add_child(chip)
+
+		var btn := Button.new()
+		btn.text = "Let speak" if silent else "Silence"
+		btn.custom_minimum_size = Vector2(104, 0)
+		btn.add_theme_font_size_override("font_size", 12)
+		btn.pressed.connect(_toggle_attendee_muted.bind(id))
+		col.add_child(btn)
+
+		# Take one suspect aside. Without this the Hall is a trap: pressing E on
+		# anyone standing in it always opens the group panel, so once two
+		# suspects are gathered there's otherwise no route to a private
+		# conversation with either of them.
+		var alone_btn := Button.new()
+		alone_btn.text = "Speak alone"
+		alone_btn.custom_minimum_size = Vector2(104, 0)
+		alone_btn.add_theme_font_size_override("font_size", 12)
+		alone_btn.pressed.connect(open_dialogue.bind(id))
+		col.add_child(alone_btn)
+
+		var send_btn := Button.new()
+		send_btn.text = "Send home"
+		send_btn.custom_minimum_size = Vector2(104, 0)
+		send_btn.add_theme_font_size_override("font_size", 12)
+		send_btn.pressed.connect(_dismiss_attendee.bind(id))
+		col.add_child(send_btn)
+
+
+## Roster button handler. Un-silencing from the button only clears the mute -
+## it doesn't hand them the floor, because unlike typing "Marcus, go ahead"
+## there's no accompanying line from the detective for them to answer.
+func _toggle_attendee_muted(id: String) -> void:
+	var gc = GameManager.group_chat
+	gc.set_muted(id, not gc.is_muted(id))
+
+
+func _on_group_roster_changed() -> void:
+	if group_panel == null or not group_panel.visible:
+		return
+	_rebuild_group_roster(GameManager.group_chat.attendees)
+
+
+## Everyone left the hall, or all but one did. With nobody left there's nothing
+## to talk to, so the panel closes. With one left the panel keeps working -
+## it's just a private conversation held in a wider window now, and closing it
+## out from under a half-finished exchange would be more disruptive than
+## leaving it open.
+func _on_group_quorum_lost(remaining: int) -> void:
+	if group_panel == null or not group_panel.visible:
+		return
+	if remaining <= 0:
+		close_group_dialogue()
+
+
+## Releases a suspect from the confrontation's freeze and walks them to
+## `room_name` - or to their own starting room if none is given.
+func _walk_attendee_out(id: String, room_name: String = "") -> void:
+	group_frozen_ids.erase(id)
+	if npc_nodes.has(id) and is_instance_valid(npc_nodes[id]):
+		npc_nodes[id].set_group_scene(false)
+	var dest := room_name
+	if dest == "":
+		dest = String(GameManager.get_character(id).get("room", ""))
+	if dest != "" and dest != MEETUP_ROOM:
+		command_npc_move(id, dest)
+
+
+## Sends one suspect back to their own room and drops them from the scene.
+func _dismiss_attendee(id: String) -> void:
+	if not GameManager.group_chat.dismiss(id):
+		return
+	_walk_attendee_out(id)
+
+
+## Drops one suspect from the scene and sends them to a room you named.
+func _move_attendee_out(id: String, room_name: String) -> void:
+	if not GameManager.group_chat.dismiss(id):
+		return
+	_walk_attendee_out(id, room_name)
+
+
+## Clears the whole Hall. Without this the only way out was dismissing each
+## suspect by name, and any you forgot stayed in the Hall occupying the
+## 4-person cap with no way to reach them one-on-one.
+func _dismiss_all_attendees() -> void:
+	for id in GameManager.group_chat.dismiss_all():
+		_walk_attendee_out(String(id))
+
+
+func _send_group_line() -> void:
+	if group_panel == null or not group_panel.visible:
+		return
+	var text := group_input.text.strip_edges()
+	if text == "":
+		return
+	var gc = GameManager.group_chat
+	# Orders and questions alike are refused mid-round; the input box is
+	# already disabled then, but Enter can still fire through it.
+	if gc.state != "awaiting_player":
+		return
+	group_input.text = ""
+
+	var cmd := _parse_group_command(text)
+	var kind := String(cmd["kind"])
+	var id := String(cmd["id"])
+
+	match kind:
+		"silence_all":
+			gc.log_player_command(text)
+			gc.silence_all()
+		"silence_all_except":
+			gc.log_player_command(text)
+			gc.silence_all(id)
+		"unmute_all":
+			gc.log_player_command(text)
+			gc.allow_all()
+		"mute":
+			gc.log_player_command(text)
+			gc.set_muted(id, true)
+		"dismiss":
+			gc.log_player_command(text)
+			_dismiss_attendee(id)
+		"dismiss_all":
+			gc.log_player_command(text)
+			_dismiss_all_attendees()
+		"move":
+			gc.log_player_command(text)
+			_move_attendee_out(id, String(cmd.get("room", "")))
+		"unmute":
+			# Restoring someone by name also gives them the floor - "Marcus, go
+			# ahead" plainly expects Marcus to say something, not just to
+			# rejoin the rotation for next time. Announce is suppressed since
+			# his answer follows immediately.
+			gc.set_muted(id, false, false)
+			gc.submit_player_line(text, id)
+		"address":
+			gc.submit_player_line(text, id)
+		_:
+			gc.submit_player_line(text)
+
+
+## The four handlers below all null-check group_panel because GroupChat lives on
+## the GameManager autoload and outlives the scene: a "Play Again" reload
+## reconnects these signals in _ready(), well before _build_ui() has created the
+## panel, and start_new_game() can emit state_changed in that window.
+func _on_group_line_added(entry: Dictionary) -> void:
+	if group_panel == null or not group_panel.visible:
+		return
+	var speaker_id := String(entry["speaker_id"])
+	var text := _colorize_names(String(entry["text"]))
+	var kind := String(entry["kind"])
+	if kind == "stage":
+		group_log.append_text("[i]%s[/i]\n\n" % text)
+	elif kind == "command":
+		# An order to the room, not a line of dialogue - dimmed so it reads as
+		# something you did rather than something you said.
+		group_log.append_text("[b]You:[/b] [i][color=#9aa0a6]%s[/color][/i]\n" % text)
+	elif speaker_id == "":
+		group_log.append_text("[b]You:[/b] %s\n\n" % text)
+	else:
+		var c := GameManager.get_character(speaker_id)
+		var col: Color = NPC_COLORS.get(speaker_id, Color(1, 0.82, 0.5))
+		group_log.append_text("[b][color=#%s]%s:[/color][/b] %s\n\n" % [col.to_html(false), String(c.get("short", "")), text])
+
+
+func _on_group_turn_started(character_id: String) -> void:
+	if group_panel == null or not group_panel.visible:
+		return
+	var c := GameManager.get_character(character_id)
+	group_status_label.text = "%s is thinking..." % String(c.get("short", ""))
+
+
+## The engine only accepts a new line while it's "awaiting_player", so the
+## input box mirrors that exactly - no way to queue a second question on top of
+## a round that's still resolving.
+func _on_group_state_changed(new_state: String) -> void:
+	if group_panel == null or not group_panel.visible:
+		return
+	var ready_for_input := new_state == "awaiting_player"
+	group_input.editable = ready_for_input
+	group_say_button.disabled = not ready_for_input
+	if ready_for_input:
+		group_status_label.text = ""
+		group_input.grab_focus()
+
+
+func _on_group_round_failed(message: String) -> void:
+	if group_panel == null or not group_panel.visible:
+		return
+	group_status_label.text = "Error: " + message
+
+
+## Writes one recorded exchange into the open one-on-one log. Lines this
+## suspect gave during a Hall meetup are replayed here too - it's one
+## continuous record for them - but marked, since the question above them was
+## put to the whole room rather than to them privately.
 func _append_transcript_entry(entry: Dictionary) -> void:
 	var c := GameManager.get_character(entry["character_id"])
 	var speaker_color: Color = NPC_COLORS.get(entry["character_id"], Color(1, 0.82, 0.5))
-	dialogue_log.append_text("[b]You:[/b] %s\n" % _colorize_names(String(entry["question"])))
+	if String(entry.get("scene", "")) == "group":
+		dialogue_log.append_text("[i][color=#9aa0a6]in the hall[/color][/i]\n")
+	var question := String(entry["question"])
+	if question != "":
+		dialogue_log.append_text("[b]You:[/b] %s\n" % _colorize_names(question))
 	dialogue_log.append_text("[b][color=#%s]%s:[/color][/b] %s\n\n" % [speaker_color.to_html(false), String(c.get("short", "")), _colorize_names(String(entry["answer"]))])
 
 
@@ -1279,6 +1924,12 @@ func _on_ollama_error(character_id: String, message: String) -> void:
 
 func open_accusation() -> void:
 	close_dialogue()
+	# The front door can't be reached with the meetup panel open (the mouse is
+	# released, which disables interaction), but leaving a live confrontation
+	# running behind the accusation screen would strand frozen suspects if that
+	# ever changes.
+	if group_panel != null and group_panel.visible:
+		close_group_dialogue()
 	accusation_result_label.text = ""
 	accusation_selected_id = ""
 	accusation_accuse_button.disabled = true
@@ -1317,7 +1968,7 @@ func toggle_notes() -> void:
 		# Default to whichever suspect was showing last time, unless you
 		# haven't talked to them (or anyone) - then pick the first suspect
 		# with any conversation.
-		if notes_selected_char == "" or GameManager.get_transcript_for(notes_selected_char).is_empty():
+		if notes_selected_char == "" or not GameManager.has_notes(notes_selected_char):
 			notes_selected_char = _first_interviewed_character()
 		_select_notes_character(notes_selected_char)
 		player.set_mouse_captured(false)
@@ -1327,7 +1978,7 @@ func toggle_notes() -> void:
 
 func _first_interviewed_character() -> String:
 	for c in GameManager.active_characters():
-		if not GameManager.get_transcript_for(c["id"]).is_empty():
+		if GameManager.has_notes(c["id"]):
 			return c["id"]
 	return ""
 
@@ -1353,7 +2004,7 @@ func _select_notes_character(id: String) -> void:
 func _update_notes_tab_styles() -> void:
 	for id in notes_tab_buttons.keys():
 		var btn: Button = notes_tab_buttons[id]
-		var talked: bool = not GameManager.get_transcript_for(id).is_empty()
+		var talked: bool = GameManager.has_notes(id)
 		btn.modulate = Color(1, 1, 1, 1.0) if talked else Color(1, 1, 1, 0.4)
 
 		if id == notes_selected_char:
@@ -1414,9 +2065,9 @@ func _on_summary_error(character_id: String, _message: String) -> void:
 
 
 ## Renders the right-hand pane for one suspect: their Timeline / Motive /
-## Slipups sections, a "Summarizing..." placeholder while one's in flight,
-## or a raw Q&A fallback if no summary is available (nothing asked yet, or
-## the last summarization attempt failed).
+## Slipups / Contradictions sections, a "Summarizing..." placeholder while one's
+## in flight, or a raw transcript fallback if no summary is available (nothing
+## asked yet, or the last summarization attempt failed).
 func _render_notes_content(id: String) -> void:
 	notes_log.clear()
 	if id == "":
@@ -1427,7 +2078,9 @@ func _render_notes_content(id: String) -> void:
 	var name_color: Color = NPC_COLORS.get(id, Color.WHITE)
 	notes_log.append_text("[b][color=#%s]%s[/color][/b] [color=#999999](%s)[/color]\n\n" % [name_color.to_html(false), String(c.get("name", "")), String(c.get("job", ""))])
 
-	var entries: Array = GameManager.get_transcript_for(id)
+	# Sources, not just their own answers: a suspect who stood silently through
+	# a Hall confrontation still has notes worth reading.
+	var entries: Array = GameManager.summary_sources(id)
 	if entries.is_empty():
 		notes_log.append_text("You haven't asked %s anything yet." % String(c.get("short", "them")))
 		return
@@ -1438,14 +2091,22 @@ func _render_notes_content(id: String) -> void:
 
 	var summary: Dictionary = GameManager.get_summary(id)
 	if summary.is_empty():
-		# No structured summary available - fall back to this suspect's raw Q&A.
+		# No structured summary available - fall back to the raw record.
 		for e in entries:
-			notes_log.append_text("Q: %s\nA: %s\n\n" % [_colorize_names(String(e["question"])), _colorize_names(String(e["answer"]))])
+			var answer := _colorize_names(String(e["answer"]))
+			if String(e["character_id"]) != id:
+				var other := GameManager.get_character(String(e["character_id"]))
+				notes_log.append_text("[i]In the hall, %s said:[/i] %s\n\n" % [String(other.get("short", "someone")), answer])
+			elif String(e.get("scene", "")) == "group":
+				notes_log.append_text("[i]In the hall[/i]\nQ: %s\nA: %s\n\n" % [_colorize_names(String(e["question"])), answer])
+			else:
+				notes_log.append_text("Q: %s\nA: %s\n\n" % [_colorize_names(String(e["question"])), answer])
 		return
 
 	notes_log.append_text("[b][color=#8fd3ff]TIMELINE[/color][/b]\n%s\n\n" % _colorize_names(_section_or_placeholder(summary.get("timeline", ""))))
 	notes_log.append_text("[b][color=#ffb37a]POTENTIAL REASON TO KILL[/color][/b]\n%s\n\n" % _colorize_names(_section_or_placeholder(summary.get("motive", ""))))
 	notes_log.append_text("[b][color=#ff8f8f]SLIPUPS[/color][/b]\n%s\n\n" % _colorize_names(_section_or_placeholder(summary.get("slipups", ""))))
+	notes_log.append_text("[b][color=#ffd166]CONTRADICTIONS[/color][/b]\n%s\n\n" % _colorize_names(_section_or_placeholder(summary.get("contradictions", ""))))
 
 
 func _section_or_placeholder(text: String) -> String:
