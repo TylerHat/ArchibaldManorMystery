@@ -161,6 +161,26 @@ contradict them standing in the same room.
   **Contradictions** section: a story told privately and then told
   differently in front of witnesses is exactly what you're hunting for.
 
+## Procedural cases (in progress)
+
+`PLAN_ProceduralCases.md` describes the work to make every playthrough generate
+its own murder - different room, weapon, method, time, and a real per-suspect
+schedule for the evening - rather than reusing one fixed scenario.
+
+**Phase 1 is in and is not yet wired into the game.** `Scripts/CaseGenerator.gd`
+builds and validates a complete case: 8 slots of 30 minutes from 8:00pm to
+midnight, everyone at dinner in the Dining Room for the first slot, then a
+walkable path per suspect through the mansion. It guarantees the murderer had
+means (they passed through the room the weapon is kept in), opportunity (alone
+with the victim), and a catchable lie (at least one innocent was actually in
+the room the murderer claims to have been in).
+
+To check it, open `Scenes/CaseGeneratorTest.tscn` and press **F6**. It builds
+1000 cases, asserts every rule, prints distribution stats, and dumps three full
+sample cases - including a preview of the schedule text each suspect will
+eventually be given. Expect `1000/1000 valid`. Playing the game normally is
+completely unaffected by this scene.
+
 ## Design notes / assumptions
 
 - Your uploaded character sheet had **8 suspects** (Dr. Evelyn Blackwood,
