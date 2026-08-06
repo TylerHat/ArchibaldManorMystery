@@ -352,6 +352,68 @@ func room_for(id: String) -> String:
 	return String(c.get("room", "Hall"))
 
 
+## The run-length encoded account of one suspect's evening, as they will tell
+## it - true for an innocent, the cover story for the murderer.
+##
+## This is the whole point of the generator. Before it, "where were you at
+## eleven" was answered by invention, so nothing could ever be checked; two
+## suspects contradicting each other meant nothing because both were making it
+## up. Now every innocent recites the same true account every time, and exactly
+## one person in the house is saying something that isn't so.
+##
+## Companions are computed from where everyone REALLY was, even on the
+## murderer's fabricated block - so their alibi names people who were genuinely
+## in that room and who will deny having seen them. That is the catchable lie.
+func evening_account(id: String) -> String:
+	if case_data.is_empty():
+		return ""
+	var is_murderer := id == murderer_id
+	var key := "claimed_paths" if is_murderer else "true_paths"
+	if not Dictionary(case_data[key]).has(id):
+		return ""
+
+	var out := ""
+	for b in CaseGenerator.account_blocks(case_data, id, case_data[key][id]):
+		var who := "on your own"
+		if int(b["from_slot"]) < CaseGenerator.DINNER_SLOTS:
+			who = "at dinner with everyone"
+		else:
+			var mates := []
+			for m in b["companions"]:
+				mates.append(String(get_character(String(m)).get("short", m)))
+			if not mates.is_empty():
+				who = "with " + _join_plain(mates)
+		out += "- %s: the %s, %s.\n" % [CaseGenerator.block_time(b), String(b["room"]), who]
+
+	# When they can safely admit to last seeing the victim alive. For the
+	# murderer this deliberately stops short of the killing - anything at or
+	# after the lie would give the game away in their own opening account.
+	var limit := int(case_data["murder_slot"])
+	if is_murderer:
+		limit = int(case_data["diverge_from"]) - 1
+	var last := -1
+	for s in range(0, limit + 1):
+		if s < 0:
+			continue
+		if String(case_data["true_paths"][id][s]) == String(case_data["victim_path"][s]):
+			last = s
+	if last >= 0:
+		out += "- You last saw %s alive at %s, in the %s.\n" % [
+			VICTIM_NAME, CaseGenerator.SLOT_TIMES[last], String(case_data["victim_path"][last])]
+	else:
+		out += "- You did not see %s at all after dinner.\n" % VICTIM_NAME
+	return out
+
+
+func _join_plain(names: Array) -> String:
+	if names.is_empty():
+		return ""
+	if names.size() == 1:
+		return String(names[0])
+	var head: Array = names.slice(0, names.size() - 1)
+	return "%s and %s" % [", ".join(PackedStringArray(head)), String(names[names.size() - 1])]
+
+
 func _build_system_prompt(id: String) -> String:
 	var c := get_character(id)
 	var text := ""
@@ -422,6 +484,25 @@ func _build_system_prompt(id: String) -> String:
 	if id == murderer_id:
 		text += "YOUR SECRET (very important, never reveal this directly): YOU are the murderer. "
 		text += "You killed %s using %s, %s, motivated by something connected to this about yourself: \"%s\". " % [VICTIM_NAME, murder_weapon, murder_time, c["flavor"]]
+
+		# The single false thing they have to keep straight. Naming it exactly -
+		# one block, one room, one substitution - is what a 3B model can just
+		# about manage; "lie about your alibi" in the abstract produces a
+		# different story every time it's asked, which is a tell for the wrong
+		# reason and unwinnable for the player.
+		if not case_data.is_empty():
+			var real_room := String(case_data["true_paths"][id][int(case_data["murder_slot"])])
+			var lie_time := CaseGenerator.block_time({
+				"from_slot": int(case_data["diverge_from"]), "to_slot": int(case_data["diverge_to"])})
+			text += "\n\nTHE ONE THING YOU LIE ABOUT: for %s you were really in the %s, where you killed him. " % [lie_time, real_room]
+			text += "You will say instead that you were in the %s for that whole period. " % String(case_data["claimed_room"])
+			text += "That single substitution is your ENTIRE lie - every other part of your account of the evening "
+			text += "is true, and you should give it honestly and consistently. Never admit to being in the %s at " % real_room
+			text += "any point last night, and never change which room you claim - if you are challenged, hold to the %s. " % String(case_data["claimed_room"])
+			text += "Other guests were in the %s at that time and may say they did not see you there. " % String(case_data["claimed_room"])
+			text += "That is your danger. If it happens, do not confess - insist, or say you must have just missed "
+			text += "each other, or that they are mistaken - but you may become visibly rattled.\n\n"
+
 		text += "You are desperate not to be caught. Lie, deflect, and stay composed as best you can. "
 		text += "However you are not a trained actor or criminal - you are still human. If the detective presses hard, "
 		text += "catches you contradicting yourself, asks very specific or repeated pointed questions, or directly accuses you "
@@ -434,6 +515,25 @@ func _build_system_prompt(id: String) -> String:
 		text += "reason to lie about your own whereabouts or about the murder itself. You may be privately guarding your "
 		text += "own personal secret described above, and can be a little evasive ONLY about that specific secret if pressed, "
 		text += "but you are otherwise honest.\n\n"
+
+	# Deliberately the LAST thing in the system prompt. A 3B model weights the
+	# end of its context far more heavily than the middle, and this is the one
+	# block it must not paraphrase from memory - every alibi question in the
+	# game is answered out of it.
+	var account := evening_account(id)
+	if account != "":
+		text += "YOUR OWN MOVEMENTS LAST NIGHT - this is the account you give. Answer every question about "
+		text += "where you were, who you were with, or when you last saw anyone by reading it off this list:\n"
+		text += account
+		text += "Those are the only rooms you were in and the only people you were with. Do not invent any "
+		text += "other location, companion, or time. If you are asked about a moment this list does not "
+		text += "cover, give the nearest entry that does.\n"
+		# Without this a suspect answers "good morning" with their entire
+		# itinerary, which reads as a rehearsed alibi from everyone at once and
+		# makes the murderer no more suspicious than anybody else.
+		text += "Answer ONLY what you are actually asked. Never recite this whole list unprompted, and never "
+		text += "volunteer your movements when the detective has asked you about something else - mention only "
+		text += "the part that answers the question in front of you.\n\n"
 
 	text += "The detective may ask you anything. Respond naturally and in character based on everything above."
 	return text

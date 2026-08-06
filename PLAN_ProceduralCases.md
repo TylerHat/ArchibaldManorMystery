@@ -145,7 +145,30 @@ schedule ends in; two suspects sharing an end room stand together. The murder
 room and weapon should differ every launch. Dialogue still improvises alibis —
 that's expected at this phase.
 
-### Phase 2b — Schedules go into the prompts
+### Phase 2b — Schedules go into the prompts ✅ DONE
+
+Building this surfaced a flaw in the Phase 1 design that the original
+validation could not see.
+
+Run-length encoding a schedule by **room alone** leaks companionship across
+time. If the murderer claims the Kitchen for the half hour of the killing, and
+an innocent walks into that Kitchen an hour later, the innocent's collapsed
+account reads *"the Kitchen, 10:30 to midnight, with Victoria"* — so the one
+witness guaranteed to break the alibi confirms it instead. Every case still
+validated; every case was unwinnable in play.
+
+Two fixes, both now asserted by the test scene:
+
+1. **`account_blocks()`** splits on room *or* companion-set change, so arrival
+   and departure times are visible. Costs ~2 more prompt lines per suspect
+   (mean 5.8, max 8).
+2. **The witness must be in the claimed room at the murder slot itself**, not
+   merely somewhere in the lie block — the murderer often walks into the room
+   they're claiming later in the same block, quite innocently. This took the
+   guarantee from 98.3% to 100% over 25,000 generated cases.
+
+`validate()` now checks the witness's *spoken account* actually contradicts the
+alibi, rather than just checking positions on the grid.
 
 - `_build_system_prompt()` gains a run-length encoded evening block; murderer
   gets the claimed version plus the secret.

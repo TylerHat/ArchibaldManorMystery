@@ -183,7 +183,17 @@ contradict them standing in the same room.
 its own murder - different room, weapon, method, time, and a real per-suspect
 schedule for the evening - rather than reusing one fixed scenario.
 
-**Phase 2a is in.** The game now plays a generated case: the murder room,
+**Phase 2b is in.** Suspects now answer from a real timeline instead of making
+it up. Ask anyone where they were at half past ten and you get the same answer
+every time, because it's read off a generated schedule rather than invented.
+Every innocent tells the truth; exactly one person in the house is lying, about
+exactly one half-hour block, and at least one innocent was standing in the room
+they claim and will say so if you put the two of them in the Hall together.
+
+That's the point of the whole system: before this, two suspects contradicting
+each other meant nothing, because both were improvising.
+
+**Phase 2a** put the generated case into the game: the murder room,
 weapon, method and time change every launch, and each suspect stands in the
 room their schedule ended the night in rather than a fixed home room. Two
 suspects can share a room, and some rooms will be empty - that's the schedule

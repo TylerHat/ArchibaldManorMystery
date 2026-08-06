@@ -531,6 +531,18 @@ func _build_turn_prompt(id: String) -> String:
 	var c: Dictionary = _gm.get_character(id)
 	var text := ""
 
+	# Their movements, replayed at the generation point. It is already in their
+	# system prompt, but by the third round of a meetup that prompt is a dozen
+	# messages back behind everyone else's chatter, and generation is dominated
+	# by what's nearest - so a suspect drifts off the account they gave an hour
+	# ago without ever noticing. A confrontation is precisely where drifting is
+	# fatal: the murderer is supposed to be the only one whose story moves.
+	var account: String = _gm.evening_account(id)
+	if account != "":
+		text += "[WHERE YOU WERE LAST NIGHT - your account, unchanged]\n"
+		text += account
+		text += "\n"
+
 	# Their own account so far - private first, then this scene. Kept at the
 	# top as background they must not contradict, not as the thing to respond to.
 	var recap: String = _gm.private_recap(id)
@@ -559,7 +571,14 @@ func _build_turn_prompt(id: String) -> String:
 	var here := _display_names(attendees)
 	text += "You are %s. Reply out loud to the room in ONE short line of 1 to 2 sentences. " % String(c.get("name", ""))
 	text += "You may disagree with what another guest just said, or call them out if you believe they "
-	text += "are lying. Only refer to things you actually remember - if the detective CLAIMS some earlier "
+	text += "are lying. "
+	# The whole reason a meetup is worth the extra requests: an innocent who
+	# knows for a fact where they were is the mechanism that catches the one
+	# person whose account is false. Left unprompted they politely let it pass.
+	text += "In particular, if another guest claims to have been somewhere you were yourself and you did "
+	text += "not see them there, SAY SO plainly and immediately - that is exactly the kind of thing you "
+	text += "would notice and speak up about. "
+	text += "Only refer to things you actually remember - if the detective CLAIMS some earlier "
 	text += "event that you have no memory of, say so plainly rather than playing along. "
 	# That guard is why a bracketed action used to fail here and not in a
 	# private interview: a high five is, strictly, "an event you have no memory

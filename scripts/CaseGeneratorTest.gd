@@ -93,7 +93,9 @@ func _run_bulk() -> Dictionary:
 		victim_rooms += _distinct(Array(c["victim_path"]).slice(0, int(c["murder_slot"]) + 1))
 
 		for pid in active:
-			var b := CaseGenerator.blocks(c["true_paths"][pid]).size()
+			# account_blocks, not blocks: the prompt splits on companionship
+			# changes too, so this is the real line count a suspect is given.
+			var b := CaseGenerator.account_blocks(c, String(pid), c["true_paths"][pid]).size()
 			block_total += b
 			block_count += 1
 			block_max = maxi(block_max, b)
@@ -228,29 +230,35 @@ func _print_case(c: Dictionary, active: Array) -> void:
 		if String(pid) == String(c["murderer_id"]):
 			print("%s%s" % ["  -> claims".rpad(14), _row(c["claimed_paths"][pid], -1)])
 
-	print("\n  what %s will actually be told:" % _n(String(c["murderer_id"])))
+	# The murderer's cover story next to the account of someone who can break
+	# it - the two blocks that have to visibly disagree for the case to be
+	# winnable. Read these side by side.
+	print("\n  COVER STORY - what %s will say:" % _n(String(c["murderer_id"])))
 	_print_evening(c, String(c["murderer_id"]), true)
-	for pid in active:
-		if String(pid) != String(c["murderer_id"]):
-			print("\n  what %s will actually be told:" % _n(String(pid)))
-			_print_evening(c, String(pid), false)
-			break
+	for wid in c["witness_ids"]:
+		print("\n  THE WITNESS - what %s will say:" % _n(String(wid)))
+		_print_evening(c, String(wid), false)
+		break
 
 
 ## Previews the run-length encoded schedule block that Phase 2b will drop into
 ## the system prompt - the real point of the whole generator.
 func _print_evening(c: Dictionary, id: String, use_claimed: bool) -> void:
 	var key := "claimed_paths" if use_claimed else "true_paths"
-	for b in CaseGenerator.blocks(c[key][id]):
+	var ms := int(c["murder_slot"])
+	for b in CaseGenerator.account_blocks(c, id, c[key][id]):
 		var mates := []
-		for m in CaseGenerator.companions(c, id, b):
+		for m in b["companions"]:
 			mates.append(_n(String(m)))
 		var who := "alone"
 		if int(b["from_slot"]) < CaseGenerator.DINNER_SLOTS:
 			who = "at dinner with everyone"
 		elif not mates.is_empty():
 			who = "with " + ", ".join(PackedStringArray(mates))
-		print("    - %-18s %-15s %s" % [CaseGenerator.block_time(b), String(b["room"]), who])
+		# Mark the line that covers the moment of the murder - for the murderer
+		# it's the lie, for a witness it's the line that disproves it.
+		var mark := "  <-- at the murder" if int(b["from_slot"]) <= ms and int(b["to_slot"]) >= ms else ""
+		print("    - %-18s %-15s %s%s" % [CaseGenerator.block_time(b), String(b["room"]), who, mark])
 	var last := CaseGenerator.last_saw_victim(c, id)
 	if last >= 0:
 		print("    (last saw the victim at %s in the %s)" % [

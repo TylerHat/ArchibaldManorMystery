@@ -393,17 +393,26 @@ static func generate(active_ids: Array, rng: RandomNumberGenerator = null) -> Di
 		var after := String(m_path[b_end + 1]) if b_end + 1 < SLOT_COUNT else ""
 		var adj := adjacency()
 
+		# The claimed room must be somewhere an innocent stood AT THE MURDER
+		# SLOT specifically - not merely somewhere in the lie block.
+		#
+		# Anywhere-in-the-block looks equivalent and isn't. The murderer often
+		# walks into the room they're claiming later in the same block, quite
+		# innocently, once the killing is done. A witness who only overlaps
+		# that tail saw them exactly where they said they were, and confirms
+		# the alibi instead of breaking it. Pinning the witness to the murder
+		# slot - the one moment the murderer provably cannot have been there -
+		# takes the guarantee from 98% to 100%.
 		var candidates := {}
-		for s in range(b_start, b_end + 1):
-			for pid in innocents:
-				var r := String(true_paths[pid][s])
-				if r == murder_room:
-					continue
-				if not adj[before].has(r):
-					continue
-				if after != "" and not adj[after].has(r):
-					continue
-				candidates[r] = true
+		for pid in innocents:
+			var r := String(true_paths[pid][murder_slot])
+			if r == murder_room:
+				continue
+			if not adj[before].has(r):
+				continue
+			if after != "" and not adj[after].has(r):
+				continue
+			candidates[r] = true
 		if candidates.is_empty():
 			continue
 		var keys := candidates.keys()
@@ -415,12 +424,14 @@ static func generate(active_ids: Array, rng: RandomNumberGenerator = null) -> Di
 		for s in range(b_start, b_end + 1):
 			claimed_paths[murderer][s] = claimed_room
 
-		# Who can actually call them a liar.
+		# Who can actually call them a liar: whoever was standing in the claimed
+		# room at the exact moment of the murder.
 		var witnesses := []
-		for s in range(b_start, b_end + 1):
-			for pid in innocents:
-				if String(true_paths[pid][s]) == claimed_room and not witnesses.has(pid):
-					witnesses.append(pid)
+		for pid in innocents:
+			if String(true_paths[pid][murder_slot]) == claimed_room:
+				witnesses.append(pid)
+		if witnesses.is_empty():
+			continue
 
 		return {
 			"murderer_id": murderer,
@@ -548,12 +559,28 @@ static func validate(c: Dictionary, active_ids: Array) -> Array:
 	if Array(c["witness_ids"]).is_empty():
 		errs.append("NOBODY can contradict the murderer - case is unwinnable")
 	for wid in c["witness_ids"]:
-		var seen_there := false
-		for s in range(bs, be + 1):
-			if String(c["true_paths"][String(wid)][s]) == String(c["claimed_room"]):
-				seen_there = true
-		if not seen_there:
-			errs.append("%s listed as a witness but was never there" % String(wid))
+		# Must be there at the murder slot itself, not merely somewhere in the
+		# lie block - see the comment in generate(). A witness who only
+		# overlaps the tail of the block corroborates the alibi instead of
+		# breaking it, and the case becomes unwinnable in play while still
+		# looking sound on paper.
+		if String(c["true_paths"][String(wid)][ms]) != String(c["claimed_room"]):
+			errs.append("%s listed as a witness but wasn't in the %s at the murder slot" % [String(wid), String(c["claimed_room"])])
+
+	# And the account the witness will actually give must visibly disagree:
+	# their run-length block covering the murder slot has to place them in the
+	# claimed room WITHOUT the murderer.
+	var disproved := false
+	for wid in c["witness_ids"]:
+		for b in account_blocks(c, String(wid), Array(c["true_paths"][String(wid)])):
+			if String(b["room"]) != String(c["claimed_room"]):
+				continue
+			if int(b["from_slot"]) > ms or int(b["to_slot"]) < ms:
+				continue
+			if not Array(b["companions"]).has(mu):
+				disproved = true
+	if not disproved:
+		errs.append("no witness's spoken account actually contradicts the alibi")
 
 	return errs
 
@@ -579,7 +606,46 @@ static func block_time(b: Dictionary) -> String:
 	return "%s to %s" % [SLOT_TIMES[int(b["from_slot"])], SLOT_END_TIMES[int(b["to_slot"])]]
 
 
+## Splits `path` into the blocks a suspect would actually narrate: a new block
+## whenever the room changes OR the set of people with them changes.
+##
+## Splitting on room alone is not enough, and the failure is subtle enough to
+## be worth spelling out. Suppose the murderer claims the Kitchen for the half
+## hour she was really killing him, and an innocent walks into that same
+## Kitchen an hour later. Collapsed by room, the innocent's account reads "the
+## Kitchen, 10:30 to midnight, with Victoria" - and the one witness who is
+## supposed to break her alibi ends up confirming it, because the block hides
+## when he actually arrived. Every case would look solvable to the generator
+## and be unwinnable in play.
+##
+## Returns [{room, from_slot, to_slot, companions: Array[id]}].
+static func account_blocks(c: Dictionary, id: String, path: Array) -> Array:
+	var out := []
+	for s in range(path.size()):
+		var room := String(path[s])
+		var mates := []
+		for pid in c["true_paths"].keys():
+			if String(pid) == id:
+				continue
+			if String(c["true_paths"][pid][s]) == room:
+				mates.append(String(pid))
+		mates.sort()
+
+		var extend := false
+		if not out.is_empty():
+			var last: Dictionary = out[out.size() - 1]
+			extend = String(last["room"]) == room and Array(last["companions"]) == mates
+		if extend:
+			out[out.size() - 1]["to_slot"] = s
+		else:
+			out.append({"room": room, "from_slot": s, "to_slot": s, "companions": mates})
+	return out
+
+
 ## Everyone (other suspects only) sharing a room with `id` during a block.
+## Prefer account_blocks() for anything a character will say out loud - this
+## reports anyone present for ANY part of the block, which is the right answer
+## for a summary and the wrong one for an alibi.
 static func companions(c: Dictionary, id: String, b: Dictionary) -> Array:
 	var out := []
 	for pid in c["true_paths"].keys():
