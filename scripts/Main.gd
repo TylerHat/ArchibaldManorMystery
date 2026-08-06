@@ -1775,6 +1775,14 @@ func _send_group_line() -> void:
 		return
 	group_input.text = ""
 
+	# Checked BEFORE command parsing, deliberately. "(Marcus, I hand you the
+	# letter)" contains a leading name and would otherwise be read as an order
+	# aimed at Marcus. A bracketed line is always a physical action, and always
+	# goes to the whole room - everyone present can see you do it.
+	if String(GameManager.parse_stage_action(text)["action"]) != "":
+		gc.submit_player_line(text)
+		return
+
 	var cmd := _parse_group_command(text)
 	var kind := String(cmd["kind"])
 	var id := String(cmd["id"])
@@ -1818,6 +1826,31 @@ func _send_group_line() -> void:
 ## the GameManager autoload and outlives the scene: a "Play Again" reload
 ## reconnects these signals in _ready(), well before _build_ui() has created the
 ## panel, and start_new_game() can emit state_changed in that window.
+## Renders a suspect's bracketed gesture - "(nods) I was in the study" - as
+## italics, so an action reads differently from speech in the log. Applied
+## after _colorize_names() rather than before; BBCode uses square brackets, so
+## a colour tag can never be mistaken for an action here.
+func _italicize_actions(text: String) -> String:
+	var out := ""
+	var depth := 0
+	for i in range(text.length()):
+		var ch := text[i]
+		if ch == "(":
+			if depth == 0:
+				out += "[i]("
+			else:
+				out += ch
+			depth += 1
+		elif ch == ")" and depth > 0:
+			depth -= 1
+			out += ")[/i]" if depth == 0 else ch
+		else:
+			out += ch
+	if depth > 0: # unclosed bracket - close the tag so it can't bleed
+		out += "[/i]"
+	return out
+
+
 func _on_group_line_added(entry: Dictionary) -> void:
 	if group_panel == null or not group_panel.visible:
 		return
@@ -1830,12 +1863,17 @@ func _on_group_line_added(entry: Dictionary) -> void:
 		# An order to the room, not a line of dialogue - dimmed so it reads as
 		# something you did rather than something you said.
 		group_log.append_text("[b]You:[/b] [i][color=#9aa0a6]%s[/color][/i]\n" % text)
+	elif kind == "action":
+		# Something you physically did. Italic like a stage direction, but kept
+		# under your name so it's clear who did it - and undimmed, because
+		# unlike an order it's a real event the room reacts to.
+		group_log.append_text("[b]You:[/b] [i]%s[/i]\n\n" % text)
 	elif speaker_id == "":
 		group_log.append_text("[b]You:[/b] %s\n\n" % text)
 	else:
 		var c := GameManager.get_character(speaker_id)
 		var col: Color = NPC_COLORS.get(speaker_id, Color(1, 0.82, 0.5))
-		group_log.append_text("[b][color=#%s]%s:[/color][/b] %s\n\n" % [col.to_html(false), String(c.get("short", "")), text])
+		group_log.append_text("[b][color=#%s]%s:[/color][/b] %s\n\n" % [col.to_html(false), String(c.get("short", "")), _italicize_actions(text)])
 
 
 func _on_group_turn_started(character_id: String) -> void:
@@ -1876,8 +1914,8 @@ func _append_transcript_entry(entry: Dictionary) -> void:
 		dialogue_log.append_text("[i][color=#9aa0a6]in the hall[/color][/i]\n")
 	var question := String(entry["question"])
 	if question != "":
-		dialogue_log.append_text("[b]You:[/b] %s\n" % _colorize_names(question))
-	dialogue_log.append_text("[b][color=#%s]%s:[/color][/b] %s\n\n" % [speaker_color.to_html(false), String(c.get("short", "")), _colorize_names(String(entry["answer"]))])
+		dialogue_log.append_text("[b]You:[/b] %s\n" % _italicize_actions(_colorize_names(question)))
+	dialogue_log.append_text("[b][color=#%s]%s:[/color][/b] %s\n\n" % [speaker_color.to_html(false), String(c.get("short", "")), _italicize_actions(_colorize_names(String(entry["answer"])))])
 
 
 func _send_question() -> void:
@@ -1888,10 +1926,15 @@ func _send_question() -> void:
 
 	# "Go to the library" / "wait in the study" etc. are handled locally as
 	# stage directions rather than sent to Ollama as an in-character question.
-	var move_room := _parse_move_command(q)
-	if move_room != "":
-		_handle_move_command(current_dialogue_character, move_room, q)
-		return
+	#
+	# Skipped entirely for a bracketed action: "(I walk Tom to the library)"
+	# contains "walk ... to ... library" and would otherwise be swallowed as a
+	# movement order instead of being roleplayed.
+	if String(GameManager.parse_stage_action(q)["action"]) == "":
+		var move_room := _parse_move_command(q)
+		if move_room != "":
+			_handle_move_command(current_dialogue_character, move_room, q)
+			return
 
 	dialogue_input.editable = false
 	dialogue_ask_button.disabled = true

@@ -53,6 +53,22 @@ view/UI stretch to fill whatever size you resize it to (no black bars).
   gather there (two of them; a third will refuse in character). Walk into
   the Hall yourself with both present and the interact prompt changes to
   **Address the room**. See "Confronting them together" below.
+- **Doing things, not just saying them** - put an action in round brackets and
+  it's treated as something you physically do, rather than words you say out
+  loud: `(I give Tom a high five)`, `(leans in) So where were you at eleven?`,
+  `(slides the photograph across the table)`. Suspects react to it as a real
+  event and can answer with a short gesture of their own - `(nods) I never left
+  the study`. Actions render in italics so they read differently from speech.
+
+  This works the same way in a private interview and in a Hall meetup. In the
+  Hall an action is always seen by the whole room, so everyone present reacts
+  to it - even if you named one person in the brackets.
+
+  It only covers things **you** do, right now. Claims about the past
+  (`(Victoria already confessed)`) are still refused by suspects who don't
+  remember them - that guard is what stops you inventing evidence, so it stays.
+  One quirk of the convention: a genuine aside like `I said (and I quote)
+  nothing` is read as an action, since there's no way to tell the two apart.
 - **Tab** - open/close your case notes. Each suspect gets their own tab
   down the left side; click one to see their notes on the right, organized
   into four sections:

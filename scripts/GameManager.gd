@@ -336,8 +336,20 @@ func _build_system_prompt(id: String) -> String:
 	text += "you were not in, or a conversation you were not part of, say plainly that you do not "
 	text += "know. Do not guess, and never invent an event, a person, or a conversation to fill the "
 	text += "gap - an honest \"I wasn't there\" is always better than a made-up answer. The detective "
-	text += "may also describe things that never happened; if you have no memory of it, say so "
-	text += "instead of playing along.\n\n"
+	text += "may also CLAIM things happened earlier that never happened; if you have no memory of it, "
+	text += "say so instead of playing along.\n\n"
+
+	# The rule above is what stops the detective inventing events and having
+	# them accepted as fact. It has to be scoped to the PAST, or it also
+	# rejects things the detective is physically doing in the room - which is
+	# the one kind of "event you don't remember" that really is happening.
+	text += "PHYSICAL ACTIONS: sometimes you will be shown something the detective is doing right now, "
+	text += "written as [THE DETECTIVE DOES THIS...]. That is really happening, in front of you, at this "
+	text += "moment. React to it naturally and in character - never deny it, never ask whether it really "
+	text += "happened, and never treat it as something they merely claimed. This is the opposite of the "
+	text += "rule above: that rule is about claims regarding the PAST, this is about what is happening NOW. "
+	text += "You may include a short physical action of your own by putting it in round brackets, like "
+	text += "(nods) or (sets down the glass). Keep it to a few words, and keep the rest of your reply spoken.\n\n"
 
 	text += "YOUR CHARACTER:\n"
 	text += "- Name: %s\n" % c["name"]
@@ -366,12 +378,85 @@ func _build_system_prompt(id: String) -> String:
 	return text
 
 
+# ------------------------------------------------------- stage directions --
+
+## Splits a detective's line into a physical action and spoken words, using
+## round brackets: "(leans in) So where were you?" -> action "leans in",
+## speech "So where were you?".
+##
+## This convention already worked by accident in one-on-one interviews, because
+## ask_character() used to hand the raw text straight to the model and small
+## models treat brackets as stage direction out of habit. It did NOT work in a
+## Hall meetup, where the line gets wrapped as something the detective *said
+## out loud* and then re-wrapped as a *question* - so the model saw a detective
+## reading the words "(I give Tom a high five)" aloud, and the anti-invention
+## rule in GroupChat's turn prompt told it to deny the event outright.
+##
+## Parsing it explicitly makes the behaviour deliberate and identical in both
+## modes. Nothing changes for a line with no brackets in it.
+##
+## Returns {"action": String, "speech": String}; either may be "".
+static func parse_stage_action(raw: String) -> Dictionary:
+	var text := raw.strip_edges()
+	var actions := []
+	var speech := ""
+	var depth := 0
+	var buf := ""
+	for i in range(text.length()):
+		var ch := text[i]
+		if ch == "(":
+			if depth > 0:
+				buf += ch
+			depth += 1
+		elif ch == ")" and depth > 0:
+			depth -= 1
+			if depth == 0:
+				if buf.strip_edges() != "":
+					actions.append(buf.strip_edges())
+				buf = ""
+			else:
+				buf += ch
+		elif depth > 0:
+			buf += ch
+		else:
+			speech += ch
+	# An unclosed bracket - keep the text as an action rather than losing it.
+	if depth > 0 and buf.strip_edges() != "":
+		actions.append(buf.strip_edges())
+
+	speech = speech.strip_edges()
+	while speech.find("  ") != -1:
+		speech = speech.replace("  ", " ")
+	return {"action": "; ".join(PackedStringArray(actions)), "speech": speech}
+
+
+## Frames a detective line for a character's memory. A plain question passes
+## through completely untouched; only a bracketed action gets rewritten, so
+## ordinary interrogation is byte-for-byte unchanged.
+##
+## The framing is emphatic on purpose. The system prompt tells every suspect to
+## refuse events they don't remember, which is what stops the detective from
+## gaslighting them - so an action the detective genuinely performs has to be
+## marked unmistakably as happening NOW and in front of them, or that same rule
+## correctly rejects it.
+func frame_player_line(raw: String) -> String:
+	var parts := parse_stage_action(raw)
+	var action := String(parts["action"])
+	if action == "":
+		return raw
+	var out := "[THE DETECTIVE DOES THIS, RIGHT NOW, IN FRONT OF YOU - it is really happening: %s]" % action
+	var speech := String(parts["speech"])
+	if speech != "":
+		out += "\nAnd says to you: \"%s\"" % speech
+	return out
+
+
 ## Send a player question to a character. Response arrives asynchronously via
 ## the ollama_response / ollama_error signals.
 func ask_character(id: String, question: String) -> void:
 	if not _histories.has(id):
 		return
-	_histories[id].append({"role": "user", "content": question})
+	_histories[id].append({"role": "user", "content": frame_player_line(question)})
 	var body := {
 		"model": OLLAMA_MODEL,
 		"messages": _histories[id],
