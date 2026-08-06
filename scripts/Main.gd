@@ -543,15 +543,33 @@ func _build_front_door(pos: Vector3) -> void:
 
 func _spawn_npcs() -> void:
 	npc_nodes.clear()
+	# Suspects used to have one fixed room each, so a random scatter inside it
+	# was always safe. Now placement comes from the generated schedule and two
+	# or three of them can legitimately end the night in the same room - a
+	# purely random offset would drop them inside one another's collision
+	# capsules. Spread them evenly round the room instead, by arrival order.
+	var occupancy := {}
 	for c in GameManager.active_characters():
-		var center: Vector3 = room_centers.get(c["room"], Vector3.ZERO)
+		var start_room := GameManager.room_for(String(c["id"]))
+		var nth := int(occupancy.get(start_room, 0))
+		occupancy[start_room] = nth + 1
+
+		var center: Vector3 = room_centers.get(start_room, Vector3.ZERO)
+		# The first suspect in a room stands near the middle; anyone joining
+		# them fans out on a ring well inside the walls, at a jittered angle so
+		# it doesn't look mechanical.
+		var angle := TAU * nth / float(CaseGenerator.MAX_PER_ROOM) + randf_range(-0.3, 0.3)
+		var radius := 0.0 if nth == 0 else 2.4
+		var offset := Vector3(cos(angle) * radius, 0, sin(angle) * radius)
+		offset += Vector3(randf_range(-0.6, 0.6), 0, randf_range(-0.6, 0.6))
+
 		var npc := CharacterBody3D.new()
 		npc.name = "NPC_" + c["id"]
 		npc.set_script(load("res://Scripts/NPCCharacter.gd"))
 		rooms_node.add_child(npc)
 		npc.character_id = c["id"]
-		npc.current_room = c["room"]
-		npc.position = Vector3(center.x + randf_range(-2.5, 2.5), 0, center.z + randf_range(-2.5, 2.5))
+		npc.current_room = start_room
+		npc.position = Vector3(center.x + offset.x, 0, center.z + offset.z)
 		npc_nodes[c["id"]] = npc
 
 		var mesh := MeshInstance3D.new()
@@ -1040,8 +1058,10 @@ func _build_ui() -> void:
 
 	debug_label = Label.new()
 	debug_label.set_anchors_preset(Control.PRESET_TOP_RIGHT)
-	debug_label.position = Vector2(-360, 16)
-	debug_label.size = Vector2(344, 80)
+	# Wide and tall enough for the full truth table (a header block plus one
+	# schedule row per suspect, and the murderer gets two).
+	debug_label.position = Vector2(-560, 16)
+	debug_label.size = Vector2(544, 420)
 	debug_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 	debug_label.autowrap_mode = TextServer.AUTOWRAP_WORD
 	debug_label.add_theme_font_size_override("font_size", 14)
@@ -2173,4 +2193,52 @@ func toggle_debug() -> void:
 
 func _refresh_debug_label() -> void:
 	var c := GameManager.get_character(GameManager.murderer_id)
-	debug_label.text = "[DEBUG] Murderer: %s\nWeapon: %s\nTime: %s" % [String(c.get("name", "?")), GameManager.murder_weapon, GameManager.murder_time]
+	var t := "[DEBUG] Murderer: %s\nWeapon: %s\nWhere: %s\nWhen: %s" % [
+		String(c.get("name", "?")), GameManager.murder_weapon,
+		GameManager.murder_room, GameManager.murder_time]
+
+	# The whole truth table, so a suspect's answer can be checked against what
+	# actually happened without digging through the console.
+	var case: Dictionary = GameManager.case_data
+	if case.is_empty():
+		debug_label.text = t + "\n(fallback scenario - no generated case)"
+		return
+
+	var w: Dictionary = case["weapon"]
+	var ms := int(case["murder_slot"])
+	t += "\nWeapon kept in: %s" % String(w["home_room"])
+	t += "\nMethod: %s" % String(case["method"])
+	t += "\nLie: claims %s for %s" % [
+		String(case["claimed_room"]),
+		CaseGenerator.block_time({"from_slot": int(case["diverge_from"]), "to_slot": int(case["diverge_to"])})]
+	var wits := []
+	for wid in case["witness_ids"]:
+		wits.append(String(GameManager.get_character(String(wid)).get("short", wid)))
+	t += "\nDisproved by: %s" % ", ".join(PackedStringArray(wits))
+
+	t += "\n\n%s" % "  ".join(PackedStringArray(CaseGenerator.SLOT_TIMES))
+	t += "\nVICTIM: %s" % _debug_path(Array(case["victim_path"]), ms)
+	for id in GameManager.active_character_ids:
+		var sid := String(id)
+		var sc := GameManager.get_character(sid)
+		var mark := " *" if sid == GameManager.murderer_id else ""
+		t += "\n%s%s: %s" % [String(sc.get("short", sid)), mark, _debug_path(Array(case["true_paths"][sid]), -1)]
+		if sid == GameManager.murderer_id:
+			t += "\n  claims: %s" % _debug_path(Array(case["claimed_paths"][sid]), -1)
+	debug_label.text = t
+
+
+## Compresses a schedule to initials so the whole cast fits in the overlay -
+## "DR Li Li Ha St St St St", with [] marking the murder slot.
+func _debug_path(path: Array, mark_slot: int) -> String:
+	var out := []
+	for i in range(path.size()):
+		var room := String(path[i])
+		var short_name := room.substr(0, 2)
+		var parts := room.split(" ")
+		if parts.size() > 1:
+			short_name = String(parts[0]).substr(0, 1) + String(parts[1]).substr(0, 1)
+		if i == mark_slot:
+			short_name = "[" + short_name + "]"
+		out.append(short_name)
+	return " ".join(PackedStringArray(out))

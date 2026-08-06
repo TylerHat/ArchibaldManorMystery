@@ -75,12 +75,12 @@ view/UI stretch to fill whatever size you resize it to (no black bars).
   - **Timeline** - their claimed whereabouts/alibi around the time of the
 	murder
   - **Potential Reason to Kill** - any motive that's come up (grudges,
-    money, secrets, relationships)
+	money, secrets, relationships)
   - **Slipups** - anything suspicious, evasive, defensive, or inconsistent
-    in how they answered
+	in how they answered
   - **Contradictions** - points where their account conflicts with what
-    another guest said in front of them in the Hall, or where their public
-    story differs from what they told you privately
+	another guest said in front of them in the Hall, or where their public
+	story differs from what they told you privately
 
   This is AI-generated from that suspect's interview, filtering out small
   talk. Summaries are generated lazily, per tab: clicking a suspect's tab
@@ -183,7 +183,22 @@ contradict them standing in the same room.
 its own murder - different room, weapon, method, time, and a real per-suspect
 schedule for the evening - rather than reusing one fixed scenario.
 
-**Phase 1 is in and is not yet wired into the game.** `Scripts/CaseGenerator.gd`
+**Phase 2a is in.** The game now plays a generated case: the murder room,
+weapon, method and time change every launch, and each suspect stands in the
+room their schedule ended the night in rather than a fixed home room. Two
+suspects can share a room, and some rooms will be empty - that's the schedule
+showing through. The story is now that the body was found the *next morning*
+and nobody has been allowed to leave, which is why everyone is still where they
+spent the evening.
+
+Suspects don't yet know their own schedules - ask one where they were and
+they'll still improvise. That's Phase 2b.
+
+Press **F1** for the full truth table: the murderer, weapon and its home room,
+the lie they're telling, who can disprove it, and every suspect's movements
+slot by slot (rooms abbreviated to two letters, `[]` marking the murder).
+
+**Phase 1** is the generator underneath it. `Scripts/CaseGenerator.gd`
 builds and validates a complete case: 8 slots of 30 minutes from 8:00pm to
 midnight, everyone at dinner in the Dining Room for the first slot, then a
 walkable path per suspect through the mansion. It guarantees the murderer had

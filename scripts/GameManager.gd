@@ -33,9 +33,13 @@ const RECAP_MAX_ITEMS := 4
 const RECAP_MAX_CHARS := 160
 
 const VICTIM_NAME := "Lord Reginald Archibald"
-const MURDER_ROOM := "the Billiard Room"
 
-const WEAPON_OPTIONS := [
+## Used only if CaseGenerator somehow fails to produce a case - the game falls
+## back to the original fixed scenario rather than crashing. Everything real
+## now comes from case_data; see CaseGenerator.gd.
+const FALLBACK_MURDER_ROOM := "the Billiard Room"
+
+const FALLBACK_WEAPONS := [
 	"a silver letter opener",
 	"a heavy brass candlestick",
 	"an antique dueling pistol",
@@ -43,7 +47,7 @@ const WEAPON_OPTIONS := [
 	"a vial of poison slipped into his brandy",
 ]
 
-const TIME_OPTIONS := [
+const FALLBACK_TIMES := [
 	"around 11:30 last night",
 	"just before midnight",
 	"in the early hours of the morning",
@@ -169,6 +173,13 @@ var dialogue_log_path: String = "" # res:// or user:// path for this session, ""
 var murderer_id: String = ""
 var murder_weapon: String = ""
 var murder_time: String = ""
+var murder_room: String = "" # "the Conservatory" - includes the article
+
+## The full generated case for this playthrough: schedules for every suspect
+## and the victim, the weapon and its home room, the murderer's lie and who can
+## disprove it. See CaseGenerator.generate() for the shape. Empty only if
+## generation failed and the fallback scenario is in use.
+var case_data: Dictionary = {}
 
 ## Every line a suspect has given the detective, in the order it happened.
 ## Entries are {character_id, question, answer}; lines spoken during a Hall
@@ -252,10 +263,30 @@ func start_new_game(character_ids: Array = []) -> void:
 		active_character_ids = character_ids.duplicate()
 
 	var pool := active_characters()
-	var idx := randi() % pool.size()
-	murderer_id = pool[idx]["id"]
-	murder_weapon = WEAPON_OPTIONS[randi() % WEAPON_OPTIONS.size()]
-	murder_time = TIME_OPTIONS[randi() % TIME_OPTIONS.size()]
+
+	# The whole case - who, where, when, with what, and every suspect's
+	# movements through the evening - comes from CaseGenerator now. See
+	# PLAN_ProceduralCases.md; run Scenes/CaseGeneratorTest.tscn to validate it
+	# in bulk. Falling back to the old fixed scenario if generation somehow
+	# fails is deliberate: a broken case should degrade to a playable game
+	# rather than a crash.
+	var ids := []
+	for c in pool:
+		ids.append(String(c["id"]))
+	case_data = CaseGenerator.generate(ids)
+
+	if case_data.is_empty():
+		push_warning("CaseGenerator failed - falling back to the fixed scenario.")
+		murderer_id = String(pool[randi() % pool.size()]["id"])
+		murder_room = FALLBACK_MURDER_ROOM
+		murder_weapon = FALLBACK_WEAPONS[randi() % FALLBACK_WEAPONS.size()]
+		murder_time = FALLBACK_TIMES[randi() % FALLBACK_TIMES.size()]
+	else:
+		murderer_id = String(case_data["murderer_id"])
+		murder_room = "the " + String(case_data["murder_room"])
+		murder_weapon = String(Dictionary(case_data["weapon"])["name"])
+		murder_time = "at about %s last night" % CaseGenerator.SLOT_TIMES[int(case_data["murder_slot"])]
+
 	transcript.clear()
 	_histories.clear()
 	_summaries.clear()
@@ -269,7 +300,12 @@ func start_new_game(character_ids: Array = []) -> void:
 		_histories[c["id"]] = [{"role": "system", "content": _build_system_prompt(c["id"])}]
 
 	var mc := get_character(murderer_id)
-	print("[DEBUG] Murderer this game: %s (id=%s) - used %s %s. Press F1 in-game to show/hide this on screen." % [mc.get("name", "?"), murderer_id, murder_weapon, murder_time])
+	print("[DEBUG] Murderer this game: %s (id=%s) - used %s in %s, %s. Press F1 in-game for the full timeline." % [mc.get("name", "?"), murderer_id, murder_weapon, murder_room, murder_time])
+	if not case_data.is_empty():
+		print("[DEBUG] Weapon kept in the %s. %s claims the %s; disproved by %d witness(es). Generated in %d attempt(s)." % [
+			String(Dictionary(case_data["weapon"])["home_room"]),
+			mc.get("short", "?"), String(case_data["claimed_room"]),
+			Array(case_data["witness_ids"]).size(), int(case_data["attempts"])])
 
 	dialogue_log_path = ""
 	if dialogue_log_enabled:
@@ -299,6 +335,23 @@ func active_characters() -> Array:
 	return out
 
 
+## Which room this suspect is standing in during the investigation: the room
+## their generated schedule ended the night in. Falls back to their fixed
+## CHARACTERS entry when no case has been generated (the fallback scenario, or
+## before start_new_game()).
+##
+## This is why placement is now information rather than decoration - finding
+## Victoria in the Conservatory means she ended the night there, and her story
+## has to agree with that.
+func room_for(id: String) -> String:
+	if not case_data.is_empty() and Dictionary(case_data["true_paths"]).has(id):
+		var path: Array = case_data["true_paths"][id]
+		if not path.is_empty():
+			return String(path[path.size() - 1])
+	var c := get_character(id)
+	return String(c.get("room", "Hall"))
+
+
 func _build_system_prompt(id: String) -> String:
 	var c := get_character(id)
 	var text := ""
@@ -309,8 +362,16 @@ func _build_system_prompt(id: String) -> String:
 	text += "long, wrap it up in the next few words rather than trailing off. Only go past 3 sentences if the detective explicitly "
 	text += "asks you to explain something in detail.\n\n"
 
-	text += "THE CASE: %s, the owner of Archibald Manor, was found dead last night in %s. " % [VICTIM_NAME, MURDER_ROOM]
+	text += "THE CASE: %s, the owner of Archibald Manor, was killed last night in %s, " % [VICTIM_NAME, murder_room]
+	text += "some time between dinner at eight and midnight. His body was found this morning. "
 	text += "A detective (the player) is questioning every guest in the house, trying to figure out who did it.\n\n"
+
+	# Without this, a suspect explains they've just come down from bed - which
+	# flatly contradicts the fact that they are standing in the room they spent
+	# last night in, where the player just walked up to them.
+	text += "WHERE YOU ARE NOW: it is the morning after. Nobody has been allowed to leave the manor, and "
+	text += "you have settled back into the room you spent most of last night in. That is where the "
+	text += "detective finds you. You are tired, unsettled, and have not been home.\n\n"
 
 	# Without an explicit cast list, characters populate the manor with people
 	# who don't exist - housekeepers, nieces, visiting couples - and then treat
@@ -356,7 +417,7 @@ func _build_system_prompt(id: String) -> String:
 	text += "- Occupation: %s\n" % c["job"]
 	text += "- Personality: %s\n" % c["personality"]
 	text += "- Personal background detail: %s\n" % c["flavor"]
-	text += "- You are currently in the %s.\n\n" % c["room"]
+	text += "- You are currently in the %s.\n\n" % room_for(id)
 
 	if id == murderer_id:
 		text += "YOUR SECRET (very important, never reveal this directly): YOU are the murderer. "

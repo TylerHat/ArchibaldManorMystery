@@ -81,7 +81,7 @@ static func _header(gm) -> String:
 	out += "- **Context window:** %d tokens\n" % gm.OLLAMA_NUM_CTX
 	out += "- **Murderer (ground truth):** %s\n" % String(murderer.get("name", "?"))
 	out += "- **Weapon / time:** %s, %s\n" % [gm.murder_weapon, gm.murder_time]
-	out += "- **Victim:** %s, in %s\n" % [gm.VICTIM_NAME, gm.MURDER_ROOM]
+	out += "- **Victim:** %s, in %s\n" % [gm.VICTIM_NAME, gm.murder_room]
 	out += "- **Suspects in play:** %s\n" % ", ".join(PackedStringArray(names))
 	out += "- **Exchanges recorded:** %d (%d private, %d in the hall)\n\n" % [gm.transcript.size(), private_count, group_count]
 	out += "> Ground truth is listed above, and each suspect's real briefing appears in their\n"
@@ -106,9 +106,9 @@ static func _per_character(gm) -> String:
 				priv += 1
 
 		out += "## %s\n\n" % String(c["name"])
-		out += "*%s - starts in the %s - **%s***\n\n" % [
+		out += "*%s - found in the %s - **%s***\n\n" % [
 			String(c["job"]),
-			String(c["room"]),
+			gm.room_for(id),
 			"THE MURDERER" if id == gm.murderer_id else "innocent",
 		]
 		out += "- **Personality briefed:** %s\n" % String(c["personality"])
