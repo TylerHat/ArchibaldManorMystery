@@ -155,7 +155,7 @@ signal group_error(character_id, message, token)
 var group_chat: Node = null
 
 ## When true, every group-scene request prints the exact message list it's
-## sending to the Godot console. Toggled with F2 in-game. Worth reaching for
+## sending to the Godot console. Toggled with Ctrl+2 in-game. Worth reaching for
 ## whenever a suspect seems to have forgotten something - it shows at a glance
 ## whether the information is missing from the payload (a bug) or present but
 ## buried far from the generation point (a prompting problem). Testing aid only.
@@ -174,6 +174,11 @@ var murderer_id: String = ""
 var murder_weapon: String = ""
 var murder_time: String = ""
 var murder_room: String = "" # "the Conservatory" - includes the article
+
+## Everything the detective has examined at (or around) the crime scene, in the
+## order they found it: [{id, title, text}]. Deduplicated by id, so walking
+## back over the body doesn't fill the notes with copies.
+var evidence_found: Array = []
 
 ## The full generated case for this playthrough: schedules for every suspect
 ## and the victim, the weapon and its home room, the murderer's lie and who can
@@ -235,16 +240,19 @@ func _setup_input_map() -> void:
 	_add_key_action("interact", KEY_E)
 	_add_key_action("toggle_notes", KEY_TAB)
 	_add_key_action("jump", KEY_SPACE)
-	_add_key_action("toggle_debug", KEY_F1)
-	_add_key_action("toggle_prompt_dump", KEY_F2)
+	# Ctrl-modified so they can't be hit by accident, and so the plain number
+	# keys stay free for anything later.
+	_add_key_action("toggle_debug", KEY_1, true)
+	_add_key_action("toggle_prompt_dump", KEY_2, true)
 
 
-func _add_key_action(action_name: String, keycode: int) -> void:
+func _add_key_action(action_name: String, keycode: int, ctrl: bool = false) -> void:
 	if not InputMap.has_action(action_name):
 		InputMap.add_action(action_name)
 	if InputMap.action_get_events(action_name).is_empty():
 		var ev := InputEventKey.new()
 		ev.physical_keycode = keycode
+		ev.ctrl_pressed = ctrl
 		InputMap.action_add_event(action_name, ev)
 
 
@@ -288,6 +296,7 @@ func start_new_game(character_ids: Array = []) -> void:
 		murder_time = "at about %s last night" % CaseGenerator.SLOT_TIMES[int(case_data["murder_slot"])]
 
 	transcript.clear()
+	evidence_found.clear()
 	_histories.clear()
 	_summaries.clear()
 	_summarized_at.clear()
@@ -300,7 +309,7 @@ func start_new_game(character_ids: Array = []) -> void:
 		_histories[c["id"]] = [{"role": "system", "content": _build_system_prompt(c["id"])}]
 
 	var mc := get_character(murderer_id)
-	print("[DEBUG] Murderer this game: %s (id=%s) - used %s in %s, %s. Press F1 in-game for the full timeline." % [mc.get("name", "?"), murderer_id, murder_weapon, murder_room, murder_time])
+	print("[DEBUG] Murderer this game: %s (id=%s) - used %s in %s, %s. Press Ctrl+1 in-game for the full timeline." % [mc.get("name", "?"), murderer_id, murder_weapon, murder_room, murder_time])
 	if not case_data.is_empty():
 		print("[DEBUG] Weapon kept in the %s. %s claims the %s; disproved by %d witness(es). Generated in %d attempt(s)." % [
 			String(Dictionary(case_data["weapon"])["home_room"]),
@@ -333,6 +342,16 @@ func active_characters() -> Array:
 		if active_character_ids.has(c["id"]):
 			out.append(c)
 	return out
+
+
+## Records a piece of evidence the first time the detective examines it.
+## Returns true if this was new.
+func note_evidence(id: String, title: String, text: String) -> bool:
+	for e in evidence_found:
+		if String(e["id"]) == id:
+			return false
+	evidence_found.append({"id": id, "title": title, "text": text})
+	return true
 
 
 ## Which room this suspect is standing in during the investigation: the room

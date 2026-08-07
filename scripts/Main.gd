@@ -126,6 +126,10 @@ var win_panel: Panel
 var win_label: Label
 
 var debug_label: Label
+var examine_panel: Panel
+var examine_title_label: Label
+var examine_body: RichTextLabel
+var crime_scene: Node3D
 
 var name_regexes: Dictionary = {} # character_id -> compiled RegEx matching that suspect's name variants
 
@@ -169,6 +173,8 @@ func _start_game(selected_ids: Array) -> void:
 	_build_world()
 	_build_mansion()
 	_spawn_npcs()
+	# After the mansion, since it needs room_centers to place anything.
+	crime_scene = load("res://Scripts/CrimeScene.gd").build(self, rooms_node)
 	_spawn_player()
 	_build_ui()
 
@@ -364,15 +370,20 @@ func _unhandled_input(event: InputEvent) -> void:
 		elif accusation_panel and accusation_panel.visible:
 			close_accusation()
 			get_viewport().set_input_as_handled()
+		elif examine_panel and examine_panel.visible:
+			close_examine()
+			get_viewport().set_input_as_handled()
 		elif notes_panel and notes_panel.visible:
 			toggle_notes()
 			get_viewport().set_input_as_handled()
 	elif event.is_action_pressed("toggle_notes"):
-		if not (dialogue_panel.visible or group_panel.visible or accusation_panel.visible):
+		if not (dialogue_panel.visible or group_panel.visible or accusation_panel.visible or examine_panel.visible):
 			toggle_notes()
-	elif event.is_action_pressed("toggle_debug"):
+	# exact_match, or a bare "1" fires these too: is_action_pressed() ignores
+	# modifiers by default, so Ctrl+1 and plain 1 would both match.
+	elif event.is_action_pressed("toggle_debug", false, true):
 		toggle_debug()
-	elif event.is_action_pressed("toggle_prompt_dump"):
+	elif event.is_action_pressed("toggle_prompt_dump", false, true):
 		GameManager.debug_dump_group = not GameManager.debug_dump_group
 		print("[DEBUG] Group prompt dump %s - the next line spoken in a hall meetup will print its full payload." % ("ON" if GameManager.debug_dump_group else "OFF"))
 
@@ -1048,7 +1059,7 @@ func _build_ui() -> void:
 	ui_layer.add_child(prompt_label)
 
 	var help := Label.new()
-	help.text = "WASD move | Space jump | Mouse look | Click or E to interact | Tab case notes | F1 debug | F2 prompt dump | Esc release mouse"
+	help.text = "WASD move | Space jump | Mouse look | Click or E to interact | Tab case notes | Ctrl+1 debug | Ctrl+2 prompt dump | Esc release mouse"
 	help.set_anchors_preset(Control.PRESET_TOP_LEFT)
 	help.position = Vector2(16, 16)
 	help.add_theme_font_size_override("font_size", 14)
@@ -1075,7 +1086,44 @@ func _build_ui() -> void:
 	_build_group_panel()
 	_build_accusation_panel()
 	_build_notes_panel()
+	_build_examine_panel()
 	_build_win_panel()
+
+
+## A small read-only panel for looking at a piece of evidence. Deliberately
+## plainer than the dialogue panel - there's nothing to type, and nothing to
+## wait for, so it's a title, a description and a way out.
+func _build_examine_panel() -> void:
+	examine_panel = Panel.new()
+	examine_panel.set_anchors_preset(Control.PRESET_CENTER)
+	examine_panel.size = Vector2(520, 300)
+	examine_panel.position = Vector2(-260, -150)
+	examine_panel.visible = false
+	ui_layer.add_child(examine_panel)
+
+	var vbox := VBoxContainer.new()
+	vbox.set_anchors_preset(Control.PRESET_FULL_RECT)
+	vbox.add_theme_constant_override("separation", 10)
+	vbox.offset_left = 18
+	vbox.offset_top = 14
+	vbox.offset_right = -18
+	vbox.offset_bottom = -14
+	examine_panel.add_child(vbox)
+
+	examine_title_label = Label.new()
+	examine_title_label.add_theme_font_size_override("font_size", 20)
+	examine_title_label.add_theme_color_override("font_color", Color(1, 0.85, 0.6))
+	vbox.add_child(examine_title_label)
+
+	examine_body = RichTextLabel.new()
+	examine_body.bbcode_enabled = true
+	examine_body.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	vbox.add_child(examine_body)
+
+	var close_button := Button.new()
+	close_button.text = "Done"
+	close_button.pressed.connect(close_examine)
+	vbox.add_child(close_button)
 
 
 func _build_dialogue_panel() -> void:
@@ -1985,6 +2033,29 @@ func _on_ollama_error(character_id: String, message: String) -> void:
 		dialogue_ask_button.disabled = false
 
 
+## Called by Evidence.interact(). Shows the description and files it in the
+## case notes the first time it's seen.
+func open_examine(node) -> void:
+	if examine_panel == null:
+		return
+	GameManager.note_evidence(String(node.evidence_id), String(node.title), String(node.examine_text))
+	examine_title_label.text = String(node.title).capitalize()
+	examine_body.clear()
+	examine_body.append_text(_colorize_names(String(node.examine_text)))
+	examine_panel.visible = true
+	hide_prompt()
+	if player:
+		player.set_mouse_captured(false)
+
+
+func close_examine() -> void:
+	if examine_panel == null:
+		return
+	examine_panel.visible = false
+	if player:
+		player.set_mouse_captured(true)
+
+
 func open_accusation() -> void:
 	close_dialogue()
 	# The front door can't be reached with the meetup panel open (the mouse is
@@ -2182,7 +2253,7 @@ func _section_or_placeholder(text: String) -> String:
 # --------------------------------------------------------------- debug UI --
 # A dev/testing aid so you don't have to interrogate all 8 suspects just to
 # confirm the murderer logic is working. This is meant for testing only -
-# remove the F1 binding (in GameManager._setup_input_map) before sharing
+# remove the Ctrl+1 binding (in GameManager._setup_input_map) before sharing
 # builds with anyone you actually want to keep guessing.
 
 func toggle_debug() -> void:

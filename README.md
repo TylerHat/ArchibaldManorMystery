@@ -94,7 +94,7 @@ view/UI stretch to fill whatever size you resize it to (no black bars).
   suspects you haven't talked to yet are dimmed, and a small red dot
   appears on any tab whose Slipups section has real content - so you can
   tell at a glance who's worth pressing further without opening every tab.
-- **F1** - toggle a debug overlay in the top-right corner that shows you
+- **Ctrl+1** - toggle a debug overlay in the top-right corner that shows you
   who the murderer is for the current game (plus the weapon/time flavor
   details), so you can test without interrogating all 8 suspects every
   time. The murderer is also printed to the Godot output console at
@@ -183,6 +183,24 @@ contradict them standing in the same room.
 its own murder - different room, weapon, method, time, and a real per-suspect
 schedule for the evening - rather than reusing one fixed scenario.
 
+**Phase 3 is in.** The crime scene is now a real place you can walk into. The
+body lies in whichever room the generator chose, with the weapon beside it, and
+you can examine all of it:
+
+- **The body** - the wound, whether there was a struggle, and a *90-minute*
+  window for the time of death. Not the exact time; narrowing that is Phase 4.
+- **The weapon** - and, crucially, which room it's normally kept in. Whoever
+  used it went there first. There's a matching clue in that room: an empty
+  table where it should be. Two ends of the same thread.
+- **A dropped personal item** belonging to one of the guests. Half the time
+  it's the murderer's; the rest of the time it belongs to an innocent who
+  genuinely was in that room earlier and will say so. It's a conversation
+  starter, not an answer.
+- **Marks on the floor**, and an overturned chair if there was a fight.
+
+Walk up to anything and press **E**. Examined evidence is remembered for the
+case notes (Phase 4 puts it on screen).
+
 **Phase 2b is in.** Suspects now answer from a real timeline instead of making
 it up. Ask anyone where they were at half past ten and you get the same answer
 every time, because it's read off a generated schedule rather than invented.
@@ -204,7 +222,7 @@ spent the evening.
 Suspects don't yet know their own schedules - ask one where they were and
 they'll still improvise. That's Phase 2b.
 
-Press **F1** for the full truth table: the murderer, weapon and its home room,
+Press **Ctrl+1** for the full truth table: the murderer, weapon and its home room,
 the lie they're telling, who can disprove it, and every suspect's movements
 slot by slot (rooms abbreviated to two letters, `[]` marking the murder).
 

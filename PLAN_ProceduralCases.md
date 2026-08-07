@@ -132,7 +132,7 @@ Phase 1 is done. Each remaining phase leaves the game playable.
   that a failure is unambiguous.
 - `Main._spawn_npcs()` places each suspect in the room their schedule ended in,
   instead of the hard-coded `CHARACTERS[i]["room"]`.
-- F1 debug overlay extended to dump the full truth table.
+- Ctrl+1 debug overlay extended to dump the full truth table.
 
 One narrative seam to close: the body is found the next morning, but everyone
 is standing where they ended the night. The prompt says so explicitly — nobody
@@ -140,7 +140,7 @@ has been allowed to leave the manor, and they've settled back into the rooms
 they spent the evening in. Without that line, a suspect will happily explain
 they've just come down from bed and undercut their own placement.
 
-**Test:** launch, press F1, walk the manor. Everyone should be in the room their
+**Test:** launch, press Ctrl+1, walk the manor. Everyone should be in the room their
 schedule ends in; two suspects sharing an end room stand together. The murder
 room and weapon should differ every launch. Dialogue still improvises alibis —
 that's expected at this phase.
@@ -178,19 +178,36 @@ alibi, rather than just checking positions on the grid.
   to "don't accept things you don't remember", so they need to read as one
   coherent set rather than three separate carve-outs.
 
-**Test:** the real one. F1 for the truth table, then ask several suspects where
+**Test:** the real one. Ctrl+1 for the truth table, then ask several suspects where
 they were at a given time and check against it. Then haul two into the Hall and
 see whether the murderer's story survives contact with someone who was in the
 room they claim. This is the phase most likely to need prompt iteration, which
 is exactly why it's isolated.
 
-### Phase 3 — Crime scene
+### Phase 3 — Crime scene ✅ DONE
 
-`Scripts/CrimeScene.gd`. Body, weapon, scattered evidence, examine interaction
-following the existing `Door.gd` pattern.
+`Scripts/CrimeScene.gd` builds the scene; `Scripts/Evidence.gd` is a
+StaticBody3D exposing `get_interact_prompt()` / `interact()`, exactly like
+`Door.gd` — so `Player.gd`'s existing centre-screen raycast picked it up with
+no changes to the player at all.
+
+Five examinables, all generated: the body (wound, method, 90-minute death
+window), the weapon (naming its home room), an empty table in that home room,
+a dropped personal item, floor marks, plus an overturned chair on `struggle`.
+
+The personal item is a coin flip between the murderer and an innocent who
+*genuinely* passed through the murder room — never one who didn't, since that
+would be the game itself lying to the player.
+
+One thing measurement caught: in 65% of generated cases at least one suspect
+ends the night standing in the murder room (up to three of them). The scene is
+therefore pushed to a room corner, ~3.9 units out, clear of both the walls and
+the ~3.0 ring `_spawn_npcs()` fans suspects onto. Placed centrally it would
+have spawned suspects inside the body most games.
 
 **Test:** find the body in the generated murder room, examine everything, check
-descriptions agree with the F1 truth table.
+descriptions agree with the Ctrl+1 truth table. Then go to the weapon's home room
+and find the gap it left.
 
 ### Phase 4 — Evidence notes and Evelyn
 
@@ -216,7 +233,7 @@ bad one). Dialogue log records the truth table alongside the transcript.
 | `Scripts/CaseGenerator.gd` | ✅ built — generates + validates the truth table |
 | `Scripts/CaseGeneratorTest.gd` + `Scenes/CaseGeneratorTest.tscn` | ✅ built — bulk validation harness |
 | `Scripts/GameManager.gd` | 2a: holds `case_data`, retires the fixed consts. 2b: schedule blocks in prompts. 4: evidence log |
-| `Scripts/Main.gd` | 2a: NPC placement + F1 overlay. 3: spawn crime scene, examine prompt. 4: Evidence tab |
+| `Scripts/Main.gd` | 2a: NPC placement + Ctrl+1 overlay. 3: spawn crime scene, examine prompt. 4: Evidence tab |
 | `Scripts/CrimeScene.gd` | 3: **new** — body, weapon, evidence props |
 | `Scripts/NPCCharacter.gd` | 2a: minor — starting room from the schedule |
 | `README.md` | documented per phase |
