@@ -518,6 +518,17 @@ func _build_system_prompt(id: String) -> String:
 	text += "some time between dinner at eight and midnight. His body was found this morning. "
 	text += "A detective (the player) is questioning every guest in the house, trying to figure out who did it.\n\n"
 
+	# The schedules now guarantee nobody walks into the murder room after the
+	# killing, which is what stops a suspect cheerfully reporting they were
+	# standing over an undiscovered corpse. Telling them WHY keeps the fiction
+	# consistent when the detective asks the obvious question - why did it take
+	# until morning for anyone to find him.
+	text += "THE CLOSED DOOR: the door to %s was found shut fast this morning, and had to be forced. " % murder_room
+	text += "It was closed for the whole of the rest of the evening after he died, so nobody went into "
+	text += "that room again all night and nobody had the least idea he was lying in there. That is why "
+	text += "he was not found until morning. You did not go into that room after the door was shut, and "
+	text += "you did not see anybody go in either. If you are asked about it, that is all you know.\n\n"
+
 	# Without this, a suspect explains they've just come down from bed - which
 	# flatly contradicts the fact that they are standing in the room they spent
 	# last night in, where the player just walked up to them.
@@ -574,6 +585,8 @@ func _build_system_prompt(id: String) -> String:
 	if id == murderer_id:
 		text += "YOUR SECRET (very important, never reveal this directly): YOU are the murderer. "
 		text += "You killed %s using %s, %s, motivated by something connected to this about yourself: \"%s\". " % [VICTIM_NAME, murder_weapon, murder_time, c["flavor"]]
+		text += "You pulled the door shut behind you as you left, and you never went back - which is why "
+		text += "he lay there until morning. Never admit that you were the one who closed that door.\n"
 
 		# The single false thing they have to keep straight. Naming it exactly -
 		# one block, one room, one substitution - is what a 3B model can just

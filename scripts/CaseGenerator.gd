@@ -203,7 +203,7 @@ static func route(a: String, b: String) -> Array:
 ## One suspect's evening. Starts at `start`, produces SLOT_COUNT rooms.
 ##
 ## `forbid` is a Dictionary of "slot:room" -> true, used to keep innocents out
-## of the murder room at the murder slot. `census` is an Array of SLOT_COUNT
+## of the murder room from the murder slot onwards. `census` is an Array of SLOT_COUNT
 ## Dictionaries of {room: headcount}, used to spread the cast out; pass an
 ## empty Array to skip the cap. (Empty rather than null because GDScript typed
 ## parameters reject null.)
@@ -346,13 +346,30 @@ static func generate(active_ids: Array, rng: RandomNumberGenerator = null) -> Di
 		while victim_path.size() < SLOT_COUNT:
 			victim_path.append(murder_room)
 
+		# Once the killing is done the murderer shuts the door on the way out,
+		# and it stays shut until the body is found in the morning. Nobody -
+		# including the murderer - sets foot in that room again for the rest of
+		# the night. Without this the schedules produce guests strolling in and
+		# out of a room with a corpse on the floor, saying nothing about it,
+		# which reads as a bug to any player who checks the timeline.
+		var sealed := {}
+		for s in range(murder_slot, SLOT_COUNT):
+			sealed["%d:%s" % [s, murder_room]] = true
+
 		# --- the murderer ---
 		# Dinner, through the room the weapon lives in, to the murder room -
 		# then a free walk once it's done.
 		var m_path := _padded_route(rng, [DINNER_ROOM, String(weapon["home_room"]), murder_room], murder_slot)
 		if m_path.is_empty():
 			continue
-		var tail := _walk(rng, murder_room, {}, [])
+		# The tail is offset so tail[i] lands on slot murder_slot + i; blocking
+		# index 1 upwards is what stops the murderer wandering back in later.
+		var tail_forbid := {}
+		for i in range(1, SLOT_COUNT):
+			tail_forbid["%d:%s" % [i, murder_room]] = true
+		var tail := _walk(rng, murder_room, tail_forbid, [])
+		if Array(tail).slice(1).has(murder_room):
+			continue
 		for i in range(1, SLOT_COUNT - murder_slot):
 			m_path.append(tail[i])
 		if m_path.size() != SLOT_COUNT:
@@ -367,12 +384,19 @@ static func generate(active_ids: Array, rng: RandomNumberGenerator = null) -> Di
 			var slot: Dictionary = census[i]
 			slot[m_path[i]] = int(slot.get(m_path[i], 0)) + 1
 
-		var forbid := {"%d:%s" % [murder_slot, murder_room]: true}
 		var spoiled := false
 		for pid in innocents:
-			var p := _walk(rng, DINNER_ROOM, forbid, census)
+			var p := _walk(rng, DINNER_ROOM, sealed, census)
 			if _distinct(p) < 2: # nobody sits in one room the entire night
 				spoiled = true
+				break
+			# _walk's last-resort fallback can ignore `forbid` in a corner case;
+			# rather than trust it, throw the case away and try again.
+			for s in range(murder_slot, SLOT_COUNT):
+				if String(p[s]) == murder_room:
+					spoiled = true
+					break
+			if spoiled:
 				break
 			true_paths[pid] = p
 		if spoiled:
@@ -447,9 +471,10 @@ static func generate(active_ids: Array, rng: RandomNumberGenerator = null) -> Di
 			if Array(true_paths[pid]).has(murder_room):
 				item_candidates.append(pid)
 		# Weighted 4-in-5 toward the innocent, not a straight coin flip. An
-		# innocent only passes through the murder room in about 64% of cases,
-		# so every time there's no candidate this falls back to the murderer -
-		# an even flip on top of that lands at 69% murderer overall, which
+		# innocent only passes through the murder room in about half of cases
+		# (the sealed-room rule cut this further, since they can now only do it
+		# BEFORE the killing), so every time there's no candidate this falls
+		# back to the murderer - an even flip on top of that lands high, which
 		# makes the item close to a pointer at the killer. Leaning the other
 		# way brings it back to roughly 50/50, which is what a red herring
 		# needs to be: informative, but not something you can act on alone.
@@ -551,6 +576,17 @@ static func validate(c: Dictionary, active_ids: Array) -> Array:
 		var pid2 := String(id)
 		if pid2 != mu and String(c["true_paths"][pid2][ms]) == mr:
 			errs.append("%s was standing in the murder room" % pid2)
+
+	# The sealed room: the killer shuts the door behind him and the body isn't
+	# found until morning, so NOBODY - not even the killer - is in that room
+	# again for the rest of the night. A suspect whose schedule walks them past
+	# a corpse without remarking on it is the single most obvious way for the
+	# timeline to look broken to a player reading it back.
+	for id in active_ids:
+		var pid4 := String(id)
+		for s in range(ms + 1, SLOT_COUNT):
+			if String(c["true_paths"][pid4][s]) == mr:
+				errs.append("%s entered the murder room at slot %d, after the killing" % [pid4, s])
 
 	# Means: they must have passed through the room the weapon lives in.
 	var home := String(Dictionary(c["weapon"])["home_room"])
