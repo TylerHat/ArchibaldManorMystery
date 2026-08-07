@@ -14,8 +14,10 @@ extends Node
 
 ## Emitted for every line that belongs in the on-screen log, whether it came
 ## from the detective, a suspect, or the engine itself (stage directions).
-## `entry` is {speaker_id, text, kind}; speaker_id "" means the detective, and
-## kind is "say" for spoken lines or "stage" for italic narration.
+## `entry` is {speaker_id, text, kind}; speaker_id "" means the detective.
+## kind is "say" for spoken lines, "stage" for the engine's own italic
+## narration, "command" for an order the detective typed, and "action" for a
+## physical thing the detective did (typed in round brackets).
 signal line_added(entry)
 
 ## Emitted when the engine changes phase so the UI can enable/disable input:
@@ -68,7 +70,15 @@ var _direct_round: bool = false # this round was aimed at one named suspect
 ## about it in the same sentence. Stating the round position explicitly is much
 ## more reliable than hoping the model infers it from message order.
 var _round_replies: Array = []
-var _last_player_line: String = "" # what the detective last said aloud, for transcript entries
+var _last_player_line: String = "" # raw text of the detective's last line, for transcript entries
+
+## The same line split into what the detective DID and what they SAID (see
+## GameManager.parse_stage_action). Held separately from _last_player_line
+## because the transcript wants the raw text the player typed, while the turn
+## prompt has to present an action and a question completely differently - one
+## is a fact of the scene, the other is something to answer.
+var _last_player_action: String = ""
+var _last_player_speech: String = ""
 var _gm: Node = null
 
 ## Every request gets a unique token; only a reply carrying the token we're
@@ -122,6 +132,8 @@ func start(ids: Array) -> void:
 	_round_start = 0
 	_direct_round = false
 	_last_player_line = ""
+	_last_player_action = ""
+	_last_player_speech = ""
 	_pending_token = -1
 	active = true
 
@@ -398,16 +410,36 @@ func submit_player_line(raw: String, direct_id: String = "") -> void:
 		muted.erase(direct_id)
 		roster_changed.emit()
 
-	_add_line("", text, "say")
+	# A bracketed action is something the detective DOES, not something they
+	# say. Quoting it as speech is what used to make suspects respond to the
+	# literal words "(I give Tom a high five)" - or, following the
+	# don't-play-along rule in _build_turn_prompt(), flatly deny it happened.
+	var parts: Dictionary = _gm.parse_stage_action(text)
+	_last_player_action = String(parts["action"])
+	_last_player_speech = String(parts["speech"])
+	# "()" and friends parse to nothing at all. Bail before _begin_round(),
+	# which would otherwise spend one Ollama request per attendee having them
+	# react to silence.
+	if _last_player_action == "" and _last_player_speech == "":
+		return
 	_last_player_line = text
+
+	if _last_player_action != "":
+		_add_line("", _last_player_action, "action")
+	if _last_player_speech != "":
+		_add_line("", _last_player_speech, "say")
+
 	# Everyone present hears the detective, including anyone who won't reply
 	# this round - being silenced doesn't make you deaf. Buffered rather than
 	# written straight to memory: it gets narrated to each suspect on their
 	# turn, together with anything else they missed.
-	var heard := "THE DETECTIVE (the person questioning you) said to the room: \"%s\"" % text
-	if direct_id != "":
-		heard = "THE DETECTIVE (the person questioning you) said to %s: \"%s\"" % [_speaker_label(direct_id), text]
-	_broadcast(heard)
+	if _last_player_action != "":
+		_broadcast("THE DETECTIVE (the person questioning you) DOES THIS, right now, in this room - it is really happening: %s" % _last_player_action)
+	if _last_player_speech != "":
+		var heard := "THE DETECTIVE (the person questioning you) said to the room: \"%s\"" % _last_player_speech
+		if direct_id != "":
+			heard = "THE DETECTIVE (the person questioning you) said to %s: \"%s\"" % [_speaker_label(direct_id), _last_player_speech]
+		_broadcast(heard)
 
 	_begin_round(direct_id)
 
@@ -499,6 +531,18 @@ func _build_turn_prompt(id: String) -> String:
 	var c: Dictionary = _gm.get_character(id)
 	var text := ""
 
+	# Their movements, replayed at the generation point. It is already in their
+	# system prompt, but by the third round of a meetup that prompt is a dozen
+	# messages back behind everyone else's chatter, and generation is dominated
+	# by what's nearest - so a suspect drifts off the account they gave an hour
+	# ago without ever noticing. A confrontation is precisely where drifting is
+	# fatal: the murderer is supposed to be the only one whose story moves.
+	var account: String = _gm.evening_account(id)
+	if account != "":
+		text += "[WHERE YOU WERE LAST NIGHT - your account, unchanged]\n"
+		text += account
+		text += "\n"
+
 	# Their own account so far - private first, then this scene. Kept at the
 	# top as background they must not contradict, not as the thing to respond to.
 	var recap: String = _gm.private_recap(id)
@@ -527,37 +571,63 @@ func _build_turn_prompt(id: String) -> String:
 	var here := _display_names(attendees)
 	text += "You are %s. Reply out loud to the room in ONE short line of 1 to 2 sentences. " % String(c.get("name", ""))
 	text += "You may disagree with what another guest just said, or call them out if you believe they "
-	text += "are lying. Only refer to things you actually remember - if the detective describes an event "
-	text += "you have no memory of, say so plainly rather than playing along. "
+	text += "are lying. "
+	# The whole reason a meetup is worth the extra requests: an innocent who
+	# knows for a fact where they were is the mechanism that catches the one
+	# person whose account is false. Left unprompted they politely let it pass.
+	text += "In particular, if another guest claims to have been somewhere you were yourself and you did "
+	text += "not see them there, SAY SO plainly and immediately - that is exactly the kind of thing you "
+	text += "would notice and speak up about. "
+	text += "Only refer to things you actually remember - if the detective CLAIMS some earlier "
+	text += "event that you have no memory of, say so plainly rather than playing along. "
+	# That guard is why a bracketed action used to fail here and not in a
+	# private interview: a high five is, strictly, "an event you have no memory
+	# of". It has to be scoped to claims about the past, or it correctly
+	# rejects things that are genuinely happening in the room.
+	text += "That applies to the PAST only - anything shown to you below as something the detective is "
+	text += "DOING is happening right now in front of you and really is happening, so react to it and "
+	text += "never deny it or ask whether it took place. "
 	# The detective can address someone who isn't here, either by mistake or to
 	# see what happens. Left unguarded, everyone invents that person's
 	# whereabouts and testimony out of nothing.
 	text += "The only people in this room are %s and the detective. " % _join_names(here)
 	text += "If the detective names anyone else, say that person is not here - never answer for them "
 	text += "and never claim to have heard them speak. "
-	text += "Do not narrate actions, do not use asterisks, do not wrap your reply in quotation marks, "
-	text += "do not speak for anyone else, and do not write your own name before your line.\n\n"
+	text += "Do not use asterisks, do not wrap your reply in quotation marks, "
+	text += "do not speak for anyone else, and do not write your own name before your line. "
+	# Asterisks stay banned - small models spray them everywhere and they read
+	# as formatting noise - but a short bracketed gesture is worth allowing, so
+	# a suspect can return a handshake instead of only describing one.
+	text += "You may add ONE short physical action of your own in round brackets, like (nods) or "
+	text += "(pushes the glass away) - a few words at most, with the rest of your line spoken.\n\n"
 
 	text += "-----\n"
-	if _last_player_line == "":
+	if _last_player_speech == "" and _last_player_action == "":
 		return text + "The room is waiting. Speak now."
 
-	if _direct_round:
-		text += "THE DETECTIVE HAS JUST ASKED YOU DIRECTLY: \"%s\"\n\n" % _last_player_line
-	else:
-		text += "THE DETECTIVE HAS JUST ASKED THE ROOM: \"%s\"\n\n" % _last_player_line
+	if _last_player_action != "":
+		text += "THE DETECTIVE HAS JUST DONE THIS, IN FRONT OF YOU - it really happened, just now: %s\n\n" % _last_player_action
+
+	if _last_player_speech != "":
+		if _direct_round:
+			text += "THE DETECTIVE HAS JUST ASKED YOU DIRECTLY: \"%s\"\n\n" % _last_player_speech
+		else:
+			text += "THE DETECTIVE HAS JUST ASKED THE ROOM: \"%s\"\n\n" % _last_player_speech
 
 	# Exactly who has answered this question so far, so nobody has to guess.
 	if _round_replies.is_empty():
-		text += "Nobody has answered yet - you are the first to speak. Do not refer to what "
+		text += "Nobody has reacted yet - you are the first to speak. Do not refer to what "
 		text += "anyone else said about this; they have not said anything yet.\n\n"
 	else:
-		text += "Already answered since the detective asked:\n"
+		text += "Already reacted since the detective spoke:\n"
 		for r in _round_replies:
 			text += "  %s said: \"%s\"\n" % [_speaker_label(String(r["id"])), String(r["text"])]
 		text += "Those are the only replies so far. Do not invent anything else anyone said.\n\n"
 
-	text += "Answer the detective's question now, in your own words."
+	if _last_player_speech != "":
+		text += "Answer the detective's question now, in your own words."
+	else:
+		text += "React to what the detective just did, in one short line, in your own words."
 	return text
 
 
@@ -592,8 +662,21 @@ func _on_group_response(character_id: String, text: String, token: int) -> void:
 	_round_replies.append({"id": character_id, "text": text})
 
 	# Everyone else in the room heard it, whether or not they reply this round.
+	# A bracketed gesture in the reply is relayed as something the others SAW,
+	# not as words - otherwise the next suspect hears "(nods)" as speech and
+	# starts answering the stage direction.
 	var c: Dictionary = _gm.get_character(character_id)
-	var heard := "%s (another guest in the room - NOT the detective) said out loud: \"%s\"" % [String(c.get("name", "")), text]
+	var who := String(c.get("name", ""))
+	var parts: Dictionary = _gm.parse_stage_action(text)
+	var act := String(parts["action"])
+	var said := String(parts["speech"])
+	var heard := ""
+	if act != "":
+		heard = "%s (another guest in the room - NOT the detective) did this: %s" % [who, act]
+		if said != "":
+			heard += ", and said out loud: \"%s\"" % said
+	else:
+		heard = "%s (another guest in the room - NOT the detective) said out loud: \"%s\"" % [who, text]
 	_broadcast(heard, character_id)
 
 	_next_turn()

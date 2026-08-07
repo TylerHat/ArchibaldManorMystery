@@ -33,9 +33,19 @@ const RECAP_MAX_ITEMS := 4
 const RECAP_MAX_CHARS := 160
 
 const VICTIM_NAME := "Lord Reginald Archibald"
-const MURDER_ROOM := "the Billiard Room"
 
-const WEAPON_OPTIONS := [
+## The forensic pathologist. She is the only character who can narrow the
+## body's time of death from a 90-minute window to a single half-hour slot -
+## and the only one who can lie about it convincingly. See
+## CaseGenerator.expert_claim_slot().
+const EXPERT_ID := "blackwood"
+
+## Used only if CaseGenerator somehow fails to produce a case - the game falls
+## back to the original fixed scenario rather than crashing. Everything real
+## now comes from case_data; see CaseGenerator.gd.
+const FALLBACK_MURDER_ROOM := "the Billiard Room"
+
+const FALLBACK_WEAPONS := [
 	"a silver letter opener",
 	"a heavy brass candlestick",
 	"an antique dueling pistol",
@@ -43,7 +53,7 @@ const WEAPON_OPTIONS := [
 	"a vial of poison slipped into his brandy",
 ]
 
-const TIME_OPTIONS := [
+const FALLBACK_TIMES := [
 	"around 11:30 last night",
 	"just before midnight",
 	"in the early hours of the morning",
@@ -151,7 +161,7 @@ signal group_error(character_id, message, token)
 var group_chat: Node = null
 
 ## When true, every group-scene request prints the exact message list it's
-## sending to the Godot console. Toggled with F2 in-game. Worth reaching for
+## sending to the Godot console. Toggled with Ctrl+2 in-game. Worth reaching for
 ## whenever a suspect seems to have forgotten something - it shows at a glance
 ## whether the information is missing from the payload (a bug) or present but
 ## buried far from the generation point (a prompting problem). Testing aid only.
@@ -166,9 +176,29 @@ var debug_dump_group: bool = false
 var dialogue_log_enabled: bool = false
 var dialogue_log_path: String = "" # res:// or user:// path for this session, "" when off
 
+## Seed for this playthrough's case. Set from the selection screen to replay a
+## specific mystery; 0 means "pick a fresh one". Kept small (under a million)
+## purely so the shareable code is short enough to read aloud or type from a
+## screenshot - a million cases per cast is far more than anyone will play.
+const MAX_SEED := 1000000
+var case_seed: int = 0
+var requested_seed: int = 0 # 0 = generate a new one
+
 var murderer_id: String = ""
 var murder_weapon: String = ""
 var murder_time: String = ""
+var murder_room: String = "" # "the Conservatory" - includes the article
+
+## Everything the detective has examined at (or around) the crime scene, in the
+## order they found it: [{id, title, text}]. Deduplicated by id, so walking
+## back over the body doesn't fill the notes with copies.
+var evidence_found: Array = []
+
+## The full generated case for this playthrough: schedules for every suspect
+## and the victim, the weapon and its home room, the murderer's lie and who can
+## disprove it. See CaseGenerator.generate() for the shape. Empty only if
+## generation failed and the fallback scenario is in use.
+var case_data: Dictionary = {}
 
 ## Every line a suspect has given the detective, in the order it happened.
 ## Entries are {character_id, question, answer}; lines spoken during a Hall
@@ -224,16 +254,19 @@ func _setup_input_map() -> void:
 	_add_key_action("interact", KEY_E)
 	_add_key_action("toggle_notes", KEY_TAB)
 	_add_key_action("jump", KEY_SPACE)
-	_add_key_action("toggle_debug", KEY_F1)
-	_add_key_action("toggle_prompt_dump", KEY_F2)
+	# Ctrl-modified so they can't be hit by accident, and so the plain number
+	# keys stay free for anything later.
+	_add_key_action("toggle_debug", KEY_1, true)
+	_add_key_action("toggle_prompt_dump", KEY_2, true)
 
 
-func _add_key_action(action_name: String, keycode: int) -> void:
+func _add_key_action(action_name: String, keycode: int, ctrl: bool = false) -> void:
 	if not InputMap.has_action(action_name):
 		InputMap.add_action(action_name)
 	if InputMap.action_get_events(action_name).is_empty():
 		var ev := InputEventKey.new()
 		ev.physical_keycode = keycode
+		ev.ctrl_pressed = ctrl
 		InputMap.action_add_event(action_name, ev)
 
 
@@ -252,11 +285,41 @@ func start_new_game(character_ids: Array = []) -> void:
 		active_character_ids = character_ids.duplicate()
 
 	var pool := active_characters()
-	var idx := randi() % pool.size()
-	murderer_id = pool[idx]["id"]
-	murder_weapon = WEAPON_OPTIONS[randi() % WEAPON_OPTIONS.size()]
-	murder_time = TIME_OPTIONS[randi() % TIME_OPTIONS.size()]
+
+	# The whole case - who, where, when, with what, and every suspect's
+	# movements through the evening - comes from CaseGenerator now. See
+	# PLAN_ProceduralCases.md; run Scenes/CaseGeneratorTest.tscn to validate it
+	# in bulk. Falling back to the old fixed scenario if generation somehow
+	# fails is deliberate: a broken case should degrade to a playable game
+	# rather than a crash.
+	var ids := []
+	for c in pool:
+		ids.append(String(c["id"]))
+
+	# Same seed + same cast = the same mystery, because the generator draws
+	# every decision from this one RNG. The cast is part of it: change who's in
+	# the house and the same seed produces something different, which is why
+	# the shareable code carries both (see case_code()).
+	case_seed = requested_seed if requested_seed > 0 else (randi() % MAX_SEED) + 1
+	requested_seed = 0 # one-shot; a later restart re-rolls unless asked again
+	var rng := RandomNumberGenerator.new()
+	rng.seed = case_seed
+	case_data = CaseGenerator.generate(ids, rng)
+
+	if case_data.is_empty():
+		push_warning("CaseGenerator failed - falling back to the fixed scenario.")
+		murderer_id = String(pool[randi() % pool.size()]["id"])
+		murder_room = FALLBACK_MURDER_ROOM
+		murder_weapon = FALLBACK_WEAPONS[randi() % FALLBACK_WEAPONS.size()]
+		murder_time = FALLBACK_TIMES[randi() % FALLBACK_TIMES.size()]
+	else:
+		murderer_id = String(case_data["murderer_id"])
+		murder_room = "the " + String(case_data["murder_room"])
+		murder_weapon = String(Dictionary(case_data["weapon"])["name"])
+		murder_time = "at about %s last night" % CaseGenerator.SLOT_TIMES[int(case_data["murder_slot"])]
+
 	transcript.clear()
+	evidence_found.clear()
 	_histories.clear()
 	_summaries.clear()
 	_summarized_at.clear()
@@ -269,7 +332,13 @@ func start_new_game(character_ids: Array = []) -> void:
 		_histories[c["id"]] = [{"role": "system", "content": _build_system_prompt(c["id"])}]
 
 	var mc := get_character(murderer_id)
-	print("[DEBUG] Murderer this game: %s (id=%s) - used %s %s. Press F1 in-game to show/hide this on screen." % [mc.get("name", "?"), murderer_id, murder_weapon, murder_time])
+	print("[DEBUG] Case code: %s  (paste this on the selection screen to replay this exact mystery)" % case_code())
+	print("[DEBUG] Murderer this game: %s (id=%s) - used %s in %s, %s. Press Ctrl+1 in-game for the full timeline." % [mc.get("name", "?"), murderer_id, murder_weapon, murder_room, murder_time])
+	if not case_data.is_empty():
+		print("[DEBUG] Weapon kept in the %s. %s claims the %s; disproved by %d witness(es). Generated in %d attempt(s)." % [
+			String(Dictionary(case_data["weapon"])["home_room"]),
+			mc.get("short", "?"), String(case_data["claimed_room"]),
+			Array(case_data["witness_ids"]).size(), int(case_data["attempts"])])
 
 	dialogue_log_path = ""
 	if dialogue_log_enabled:
@@ -299,6 +368,142 @@ func active_characters() -> Array:
 	return out
 
 
+# ------------------------------------------------------------- case codes --
+
+## "482913-171" - the seed, then a bitmask of which suspects were in the house.
+##
+## The cast has to be in the code. The generator makes every decision from one
+## RNG, so the same seed with a different set of suspects produces a completely
+## different mystery - a seed on its own would look reproducible and quietly
+## not be. Encoding both means one string restores the exact case.
+func case_code() -> String:
+	var mask := 0
+	for i in range(CHARACTERS.size()):
+		if active_character_ids.has(String(CHARACTERS[i]["id"])):
+			mask |= 1 << i
+	return "%d-%d" % [case_seed, mask]
+
+
+## Parses a code back into {"seed": int, "ids": Array}. Returns {} if it can't
+## be read, so the caller can just ignore bad input rather than validating it
+## twice. A bare seed with no cast is accepted too - the player keeps whatever
+## suspects they've ticked.
+func parse_case_code(code: String) -> Dictionary:
+	var text := code.strip_edges()
+	if text == "":
+		return {}
+	var parts := text.split("-")
+	if parts.size() > 2:
+		return {}
+	if not String(parts[0]).is_valid_int():
+		return {}
+	var out_seed := int(String(parts[0]))
+	if out_seed <= 0 or out_seed >= MAX_SEED:
+		return {}
+	if parts.size() == 1:
+		return {"seed": out_seed, "ids": []}
+
+	if not String(parts[1]).is_valid_int():
+		return {}
+	var mask := int(String(parts[1]))
+	var ids := []
+	for i in range(CHARACTERS.size()):
+		if mask & (1 << i):
+			ids.append(String(CHARACTERS[i]["id"]))
+	if ids.size() < 2:
+		return {}
+	return {"seed": out_seed, "ids": ids}
+
+
+## Records a piece of evidence the first time the detective examines it.
+## Returns true if this was new.
+func note_evidence(id: String, title: String, text: String) -> bool:
+	for e in evidence_found:
+		if String(e["id"]) == id:
+			return false
+	evidence_found.append({"id": id, "title": title, "text": text})
+	return true
+
+
+## Which room this suspect is standing in during the investigation: the room
+## their generated schedule ended the night in. Falls back to their fixed
+## CHARACTERS entry when no case has been generated (the fallback scenario, or
+## before start_new_game()).
+##
+## This is why placement is now information rather than decoration - finding
+## Victoria in the Conservatory means she ended the night there, and her story
+## has to agree with that.
+func room_for(id: String) -> String:
+	if not case_data.is_empty() and Dictionary(case_data["true_paths"]).has(id):
+		var path: Array = case_data["true_paths"][id]
+		if not path.is_empty():
+			return String(path[path.size() - 1])
+	var c := get_character(id)
+	return String(c.get("room", "Hall"))
+
+
+## The run-length encoded account of one suspect's evening, as they will tell
+## it - true for an innocent, the cover story for the murderer.
+##
+## This is the whole point of the generator. Before it, "where were you at
+## eleven" was answered by invention, so nothing could ever be checked; two
+## suspects contradicting each other meant nothing because both were making it
+## up. Now every innocent recites the same true account every time, and exactly
+## one person in the house is saying something that isn't so.
+##
+## Companions are computed from where everyone REALLY was, even on the
+## murderer's fabricated block - so their alibi names people who were genuinely
+## in that room and who will deny having seen them. That is the catchable lie.
+func evening_account(id: String) -> String:
+	if case_data.is_empty():
+		return ""
+	var is_murderer := id == murderer_id
+	var key := "claimed_paths" if is_murderer else "true_paths"
+	if not Dictionary(case_data[key]).has(id):
+		return ""
+
+	var out := ""
+	for b in CaseGenerator.account_blocks(case_data, id, case_data[key][id]):
+		var who := "on your own"
+		if int(b["from_slot"]) < CaseGenerator.DINNER_SLOTS:
+			who = "at dinner with everyone"
+		else:
+			var mates := []
+			for m in b["companions"]:
+				mates.append(String(get_character(String(m)).get("short", m)))
+			if not mates.is_empty():
+				who = "with " + _join_plain(mates)
+		out += "- %s: the %s, %s.\n" % [CaseGenerator.block_time(b), String(b["room"]), who]
+
+	# When they can safely admit to last seeing the victim alive. For the
+	# murderer this deliberately stops short of the killing - anything at or
+	# after the lie would give the game away in their own opening account.
+	var limit := int(case_data["murder_slot"])
+	if is_murderer:
+		limit = int(case_data["diverge_from"]) - 1
+	var last := -1
+	for s in range(0, limit + 1):
+		if s < 0:
+			continue
+		if String(case_data["true_paths"][id][s]) == String(case_data["victim_path"][s]):
+			last = s
+	if last >= 0:
+		out += "- You last saw %s alive at %s, in the %s.\n" % [
+			VICTIM_NAME, CaseGenerator.SLOT_TIMES[last], String(case_data["victim_path"][last])]
+	else:
+		out += "- You did not see %s at all after dinner.\n" % VICTIM_NAME
+	return out
+
+
+func _join_plain(names: Array) -> String:
+	if names.is_empty():
+		return ""
+	if names.size() == 1:
+		return String(names[0])
+	var head: Array = names.slice(0, names.size() - 1)
+	return "%s and %s" % [", ".join(PackedStringArray(head)), String(names[names.size() - 1])]
+
+
 func _build_system_prompt(id: String) -> String:
 	var c := get_character(id)
 	var text := ""
@@ -309,8 +514,16 @@ func _build_system_prompt(id: String) -> String:
 	text += "long, wrap it up in the next few words rather than trailing off. Only go past 3 sentences if the detective explicitly "
 	text += "asks you to explain something in detail.\n\n"
 
-	text += "THE CASE: %s, the owner of Archibald Manor, was found dead last night in %s. " % [VICTIM_NAME, MURDER_ROOM]
+	text += "THE CASE: %s, the owner of Archibald Manor, was killed last night in %s, " % [VICTIM_NAME, murder_room]
+	text += "some time between dinner at eight and midnight. His body was found this morning. "
 	text += "A detective (the player) is questioning every guest in the house, trying to figure out who did it.\n\n"
+
+	# Without this, a suspect explains they've just come down from bed - which
+	# flatly contradicts the fact that they are standing in the room they spent
+	# last night in, where the player just walked up to them.
+	text += "WHERE YOU ARE NOW: it is the morning after. Nobody has been allowed to leave the manor, and "
+	text += "you have settled back into the room you spent most of last night in. That is where the "
+	text += "detective finds you. You are tired, unsettled, and have not been home.\n\n"
 
 	# Without an explicit cast list, characters populate the manor with people
 	# who don't exist - housekeepers, nieces, visiting couples - and then treat
@@ -336,19 +549,50 @@ func _build_system_prompt(id: String) -> String:
 	text += "you were not in, or a conversation you were not part of, say plainly that you do not "
 	text += "know. Do not guess, and never invent an event, a person, or a conversation to fill the "
 	text += "gap - an honest \"I wasn't there\" is always better than a made-up answer. The detective "
-	text += "may also describe things that never happened; if you have no memory of it, say so "
-	text += "instead of playing along.\n\n"
+	text += "may also CLAIM things happened earlier that never happened; if you have no memory of it, "
+	text += "say so instead of playing along.\n\n"
+
+	# The rule above is what stops the detective inventing events and having
+	# them accepted as fact. It has to be scoped to the PAST, or it also
+	# rejects things the detective is physically doing in the room - which is
+	# the one kind of "event you don't remember" that really is happening.
+	text += "PHYSICAL ACTIONS: sometimes you will be shown something the detective is doing right now, "
+	text += "written as [THE DETECTIVE DOES THIS...]. That is really happening, in front of you, at this "
+	text += "moment. React to it naturally and in character - never deny it, never ask whether it really "
+	text += "happened, and never treat it as something they merely claimed. This is the opposite of the "
+	text += "rule above: that rule is about claims regarding the PAST, this is about what is happening NOW. "
+	text += "You may include a short physical action of your own by putting it in round brackets, like "
+	text += "(nods) or (sets down the glass). Keep it to a few words, and keep the rest of your reply spoken.\n\n"
 
 	text += "YOUR CHARACTER:\n"
 	text += "- Name: %s\n" % c["name"]
 	text += "- Occupation: %s\n" % c["job"]
 	text += "- Personality: %s\n" % c["personality"]
 	text += "- Personal background detail: %s\n" % c["flavor"]
-	text += "- You are currently in the %s.\n\n" % c["room"]
+	text += "- You are currently in the %s.\n\n" % room_for(id)
 
 	if id == murderer_id:
 		text += "YOUR SECRET (very important, never reveal this directly): YOU are the murderer. "
 		text += "You killed %s using %s, %s, motivated by something connected to this about yourself: \"%s\". " % [VICTIM_NAME, murder_weapon, murder_time, c["flavor"]]
+
+		# The single false thing they have to keep straight. Naming it exactly -
+		# one block, one room, one substitution - is what a 3B model can just
+		# about manage; "lie about your alibi" in the abstract produces a
+		# different story every time it's asked, which is a tell for the wrong
+		# reason and unwinnable for the player.
+		if not case_data.is_empty():
+			var real_room := String(case_data["true_paths"][id][int(case_data["murder_slot"])])
+			var lie_time := CaseGenerator.block_time({
+				"from_slot": int(case_data["diverge_from"]), "to_slot": int(case_data["diverge_to"])})
+			text += "\n\nTHE ONE THING YOU LIE ABOUT: for %s you were really in the %s, where you killed him. " % [lie_time, real_room]
+			text += "You will say instead that you were in the %s for that whole period. " % String(case_data["claimed_room"])
+			text += "That single substitution is your ENTIRE lie - every other part of your account of the evening "
+			text += "is true, and you should give it honestly and consistently. Never admit to being in the %s at " % real_room
+			text += "any point last night, and never change which room you claim - if you are challenged, hold to the %s. " % String(case_data["claimed_room"])
+			text += "Other guests were in the %s at that time and may say they did not see you there. " % String(case_data["claimed_room"])
+			text += "That is your danger. If it happens, do not confess - insist, or say you must have just missed "
+			text += "each other, or that they are mistaken - but you may become visibly rattled.\n\n"
+
 		text += "You are desperate not to be caught. Lie, deflect, and stay composed as best you can. "
 		text += "However you are not a trained actor or criminal - you are still human. If the detective presses hard, "
 		text += "catches you contradicting yourself, asks very specific or repeated pointed questions, or directly accuses you "
@@ -362,8 +606,122 @@ func _build_system_prompt(id: String) -> String:
 		text += "own personal secret described above, and can be a little evasive ONLY about that specific secret if pressed, "
 		text += "but you are otherwise honest.\n\n"
 
+	# The one character whose occupation gives her information nobody else in
+	# the house can produce. The body only yields a 90-minute window to an
+	# ordinary observer; she collapses it to a single half hour, which usually
+	# clears two or three people outright. It also makes her dangerous when
+	# she's guilty, since she is the only person who can lie with authority.
+	if id == EXPERT_ID and not case_data.is_empty():
+		var claim := CaseGenerator.expert_claim_slot(case_data, id)
+		if claim >= 0:
+			text += "YOUR EXPERT FINDING: you examined the body this morning - it is your profession, and "
+			text += "nobody else here is qualified to. You are confident he died at about %s, " % CaseGenerator.SLOT_TIMES[claim]
+			text += "and you can say so with far more precision than anyone looking at him casually could. "
+			if id == murderer_id:
+				text += "This is a lie. You know perfectly well when he died, because you were there. You are "
+				text += "using the one thing in this house nobody can argue with to move the time away from "
+				text += "yourself. State it calmly, as a professional judgement. Do not hedge, do not offer a "
+				text += "range, and do not let anyone talk you off it - but if the detective points out that "
+				text += "the body itself suggests otherwise, you will be badly rattled.\n\n"
+			else:
+				text += "Say so plainly if you are asked about the body, the time of death, or the injuries. "
+				text += "You are not showing off - you are stating what you know. If someone's account of "
+				text += "where they were conflicts with that time, you can point it out.\n\n"
+
+	# Deliberately the LAST thing in the system prompt. A 3B model weights the
+	# end of its context far more heavily than the middle, and this is the one
+	# block it must not paraphrase from memory - every alibi question in the
+	# game is answered out of it.
+	var account := evening_account(id)
+	if account != "":
+		text += "YOUR OWN MOVEMENTS LAST NIGHT - this is the account you give. Answer every question about "
+		text += "where you were, who you were with, or when you last saw anyone by reading it off this list:\n"
+		text += account
+		text += "Those are the only rooms you were in and the only people you were with. Do not invent any "
+		text += "other location, companion, or time. If you are asked about a moment this list does not "
+		text += "cover, give the nearest entry that does.\n"
+		# Without this a suspect answers "good morning" with their entire
+		# itinerary, which reads as a rehearsed alibi from everyone at once and
+		# makes the murderer no more suspicious than anybody else.
+		text += "Answer ONLY what you are actually asked. Never recite this whole list unprompted, and never "
+		text += "volunteer your movements when the detective has asked you about something else - mention only "
+		text += "the part that answers the question in front of you.\n\n"
+
 	text += "The detective may ask you anything. Respond naturally and in character based on everything above."
 	return text
+
+
+# ------------------------------------------------------- stage directions --
+
+## Splits a detective's line into a physical action and spoken words, using
+## round brackets: "(leans in) So where were you?" -> action "leans in",
+## speech "So where were you?".
+##
+## This convention already worked by accident in one-on-one interviews, because
+## ask_character() used to hand the raw text straight to the model and small
+## models treat brackets as stage direction out of habit. It did NOT work in a
+## Hall meetup, where the line gets wrapped as something the detective *said
+## out loud* and then re-wrapped as a *question* - so the model saw a detective
+## reading the words "(I give Tom a high five)" aloud, and the anti-invention
+## rule in GroupChat's turn prompt told it to deny the event outright.
+##
+## Parsing it explicitly makes the behaviour deliberate and identical in both
+## modes. Nothing changes for a line with no brackets in it.
+##
+## Returns {"action": String, "speech": String}; either may be "".
+static func parse_stage_action(raw: String) -> Dictionary:
+	var text := raw.strip_edges()
+	var actions := []
+	var speech := ""
+	var depth := 0
+	var buf := ""
+	for i in range(text.length()):
+		var ch := text[i]
+		if ch == "(":
+			if depth > 0:
+				buf += ch
+			depth += 1
+		elif ch == ")" and depth > 0:
+			depth -= 1
+			if depth == 0:
+				if buf.strip_edges() != "":
+					actions.append(buf.strip_edges())
+				buf = ""
+			else:
+				buf += ch
+		elif depth > 0:
+			buf += ch
+		else:
+			speech += ch
+	# An unclosed bracket - keep the text as an action rather than losing it.
+	if depth > 0 and buf.strip_edges() != "":
+		actions.append(buf.strip_edges())
+
+	speech = speech.strip_edges()
+	while speech.find("  ") != -1:
+		speech = speech.replace("  ", " ")
+	return {"action": "; ".join(PackedStringArray(actions)), "speech": speech}
+
+
+## Frames a detective line for a character's memory. A plain question passes
+## through completely untouched; only a bracketed action gets rewritten, so
+## ordinary interrogation is byte-for-byte unchanged.
+##
+## The framing is emphatic on purpose. The system prompt tells every suspect to
+## refuse events they don't remember, which is what stops the detective from
+## gaslighting them - so an action the detective genuinely performs has to be
+## marked unmistakably as happening NOW and in front of them, or that same rule
+## correctly rejects it.
+func frame_player_line(raw: String) -> String:
+	var parts := parse_stage_action(raw)
+	var action := String(parts["action"])
+	if action == "":
+		return raw
+	var out := "[THE DETECTIVE DOES THIS, RIGHT NOW, IN FRONT OF YOU - it is really happening: %s]" % action
+	var speech := String(parts["speech"])
+	if speech != "":
+		out += "\nAnd says to you: \"%s\"" % speech
+	return out
 
 
 ## Send a player question to a character. Response arrives asynchronously via
@@ -371,7 +729,7 @@ func _build_system_prompt(id: String) -> String:
 func ask_character(id: String, question: String) -> void:
 	if not _histories.has(id):
 		return
-	_histories[id].append({"role": "user", "content": question})
+	_histories[id].append({"role": "user", "content": frame_player_line(question)})
 	var body := {
 		"model": OLLAMA_MODEL,
 		"messages": _histories[id],

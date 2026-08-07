@@ -120,12 +120,20 @@ var notes_log: RichTextLabel
 var notes_tab_buttons: Dictionary = {} # character_id -> Button
 var notes_flag_dots: Dictionary = {} # character_id -> ColorRect (shown when Slipups has real content)
 var notes_selected_char: String = ""
+
+## Reserved tab id for the crime-scene evidence pane. Not a character, so
+## anything that treats a tab id as a suspect has to skip it.
+const EVIDENCE_TAB := "__evidence__"
 var _pending_summaries: Dictionary = {} # character_id -> true while a summary request is in flight
 
 var win_panel: Panel
 var win_label: Label
 
 var debug_label: Label
+var examine_panel: Panel
+var examine_title_label: Label
+var examine_body: RichTextLabel
+var crime_scene: Node3D
 
 var name_regexes: Dictionary = {} # character_id -> compiled RegEx matching that suspect's name variants
 
@@ -134,6 +142,8 @@ var selection_checkboxes: Dictionary = {} # character_id -> CheckBox
 var selection_count_label: Label
 var selection_start_button: Button
 var selection_log_checkbox: CheckBox
+var selection_seed_input: LineEdit
+var selection_seed_status: Label
 
 
 func _ready() -> void:
@@ -169,6 +179,8 @@ func _start_game(selected_ids: Array) -> void:
 	_build_world()
 	_build_mansion()
 	_spawn_npcs()
+	# After the mansion, since it needs room_centers to place anything.
+	crime_scene = load("res://Scripts/CrimeScene.gd").build(self, rooms_node)
 	_spawn_player()
 	_build_ui()
 
@@ -275,6 +287,36 @@ func _build_selection_screen() -> void:
 	log_hint.add_theme_color_override("font_color", Color(1, 1, 1, 0.55))
 	vbox.add_child(log_hint)
 
+	# Case code. Blank means a fresh mystery, which is the normal path - this
+	# is for replaying one you liked, or handing me one that went wrong.
+	var code_row := HBoxContainer.new()
+	code_row.add_theme_constant_override("separation", 8)
+	vbox.add_child(code_row)
+
+	var code_label := Label.new()
+	code_label.text = "Case code (optional):"
+	code_row.add_child(code_label)
+
+	selection_seed_input = LineEdit.new()
+	selection_seed_input.placeholder_text = "leave blank for a new mystery"
+	selection_seed_input.custom_minimum_size = Vector2(220, 0)
+	selection_seed_input.tooltip_text = "Paste a code from a previous game to play that exact case again - same murderer, same schedules, same weapon. The code includes which suspects were in the house, so it will re-tick them for you."
+	selection_seed_input.text_changed.connect(_on_seed_input_changed)
+	code_row.add_child(selection_seed_input)
+
+	selection_seed_status = Label.new()
+	selection_seed_status.add_theme_font_size_override("font_size", 12)
+	code_row.add_child(selection_seed_status)
+
+	# The code from the game you just finished, so "that was a good one" is
+	# recoverable after the fact rather than needing foresight.
+	if GameManager.case_seed > 0:
+		var last := Label.new()
+		last.text = "Last case: %s" % GameManager.case_code()
+		last.add_theme_font_size_override("font_size", 12)
+		last.add_theme_color_override("font_color", Color(1, 1, 1, 0.55))
+		vbox.add_child(last)
+
 	var button_row := HBoxContainer.new()
 	button_row.add_theme_constant_override("separation", 10)
 	vbox.add_child(button_row)
@@ -295,6 +337,28 @@ func _build_selection_screen() -> void:
 	button_row.add_child(selection_start_button)
 
 	_update_selection_count()
+
+
+## Live feedback as the code is typed, and - the useful part - re-ticking the
+## suspects the code was generated with. Getting the cast wrong silently
+## produces a different mystery under the same seed, so it can't be left to the
+## player to remember who was in the house.
+func _on_seed_input_changed(text: String) -> void:
+	if text.strip_edges() == "":
+		selection_seed_status.text = ""
+		return
+	var parsed := GameManager.parse_case_code(text)
+	if parsed.is_empty():
+		selection_seed_status.text = "not a valid code"
+		selection_seed_status.add_theme_color_override("font_color", Color(1, 0.5, 0.5))
+		return
+	selection_seed_status.text = "ok"
+	selection_seed_status.add_theme_color_override("font_color", Color(0.5, 1, 0.6))
+	var ids: Array = parsed["ids"]
+	if not ids.is_empty():
+		for id in selection_checkboxes.keys():
+			selection_checkboxes[id].button_pressed = ids.has(String(id))
+		_update_selection_count()
 
 
 func _random_select(n: int) -> void:
@@ -346,6 +410,16 @@ func _on_start_pressed() -> void:
 		GameManager.dialogue_log_enabled = selection_log_checkbox.button_pressed
 	selection_log_checkbox = null
 
+	# An unreadable code is ignored rather than blocking the button - the
+	# status label next to the field already said so while it was being typed.
+	GameManager.requested_seed = 0
+	if selection_seed_input != null:
+		var parsed := GameManager.parse_case_code(selection_seed_input.text)
+		if not parsed.is_empty():
+			GameManager.requested_seed = int(parsed["seed"])
+	selection_seed_input = null
+	selection_seed_status = null
+
 	selection_layer.queue_free()
 	selection_layer = null
 	_start_game(selected_ids)
@@ -364,15 +438,20 @@ func _unhandled_input(event: InputEvent) -> void:
 		elif accusation_panel and accusation_panel.visible:
 			close_accusation()
 			get_viewport().set_input_as_handled()
+		elif examine_panel and examine_panel.visible:
+			close_examine()
+			get_viewport().set_input_as_handled()
 		elif notes_panel and notes_panel.visible:
 			toggle_notes()
 			get_viewport().set_input_as_handled()
 	elif event.is_action_pressed("toggle_notes"):
-		if not (dialogue_panel.visible or group_panel.visible or accusation_panel.visible):
+		if not (dialogue_panel.visible or group_panel.visible or accusation_panel.visible or examine_panel.visible):
 			toggle_notes()
-	elif event.is_action_pressed("toggle_debug"):
+	# exact_match, or a bare "1" fires these too: is_action_pressed() ignores
+	# modifiers by default, so Ctrl+1 and plain 1 would both match.
+	elif event.is_action_pressed("toggle_debug", false, true):
 		toggle_debug()
-	elif event.is_action_pressed("toggle_prompt_dump"):
+	elif event.is_action_pressed("toggle_prompt_dump", false, true):
 		GameManager.debug_dump_group = not GameManager.debug_dump_group
 		print("[DEBUG] Group prompt dump %s - the next line spoken in a hall meetup will print its full payload." % ("ON" if GameManager.debug_dump_group else "OFF"))
 
@@ -543,15 +622,33 @@ func _build_front_door(pos: Vector3) -> void:
 
 func _spawn_npcs() -> void:
 	npc_nodes.clear()
+	# Suspects used to have one fixed room each, so a random scatter inside it
+	# was always safe. Now placement comes from the generated schedule and two
+	# or three of them can legitimately end the night in the same room - a
+	# purely random offset would drop them inside one another's collision
+	# capsules. Spread them evenly round the room instead, by arrival order.
+	var occupancy := {}
 	for c in GameManager.active_characters():
-		var center: Vector3 = room_centers.get(c["room"], Vector3.ZERO)
+		var start_room := GameManager.room_for(String(c["id"]))
+		var nth := int(occupancy.get(start_room, 0))
+		occupancy[start_room] = nth + 1
+
+		var center: Vector3 = room_centers.get(start_room, Vector3.ZERO)
+		# The first suspect in a room stands near the middle; anyone joining
+		# them fans out on a ring well inside the walls, at a jittered angle so
+		# it doesn't look mechanical.
+		var angle := TAU * nth / float(CaseGenerator.MAX_PER_ROOM) + randf_range(-0.3, 0.3)
+		var radius := 0.0 if nth == 0 else 2.4
+		var offset := Vector3(cos(angle) * radius, 0, sin(angle) * radius)
+		offset += Vector3(randf_range(-0.6, 0.6), 0, randf_range(-0.6, 0.6))
+
 		var npc := CharacterBody3D.new()
 		npc.name = "NPC_" + c["id"]
 		npc.set_script(load("res://Scripts/NPCCharacter.gd"))
 		rooms_node.add_child(npc)
 		npc.character_id = c["id"]
-		npc.current_room = c["room"]
-		npc.position = Vector3(center.x + randf_range(-2.5, 2.5), 0, center.z + randf_range(-2.5, 2.5))
+		npc.current_room = start_room
+		npc.position = Vector3(center.x + offset.x, 0, center.z + offset.z)
 		npc_nodes[c["id"]] = npc
 
 		var mesh := MeshInstance3D.new()
@@ -1030,7 +1127,7 @@ func _build_ui() -> void:
 	ui_layer.add_child(prompt_label)
 
 	var help := Label.new()
-	help.text = "WASD move | Space jump | Mouse look | Click or E to interact | Tab case notes | F1 debug | F2 prompt dump | Esc release mouse"
+	help.text = "WASD move | Space jump | Mouse look | Click or E to interact | Tab case notes | Ctrl+1 debug | Ctrl+2 prompt dump | Esc release mouse"
 	help.set_anchors_preset(Control.PRESET_TOP_LEFT)
 	help.position = Vector2(16, 16)
 	help.add_theme_font_size_override("font_size", 14)
@@ -1040,8 +1137,10 @@ func _build_ui() -> void:
 
 	debug_label = Label.new()
 	debug_label.set_anchors_preset(Control.PRESET_TOP_RIGHT)
-	debug_label.position = Vector2(-360, 16)
-	debug_label.size = Vector2(344, 80)
+	# Wide and tall enough for the full truth table (a header block plus one
+	# schedule row per suspect, and the murderer gets two).
+	debug_label.position = Vector2(-560, 16)
+	debug_label.size = Vector2(544, 420)
 	debug_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 	debug_label.autowrap_mode = TextServer.AUTOWRAP_WORD
 	debug_label.add_theme_font_size_override("font_size", 14)
@@ -1055,7 +1154,44 @@ func _build_ui() -> void:
 	_build_group_panel()
 	_build_accusation_panel()
 	_build_notes_panel()
+	_build_examine_panel()
 	_build_win_panel()
+
+
+## A small read-only panel for looking at a piece of evidence. Deliberately
+## plainer than the dialogue panel - there's nothing to type, and nothing to
+## wait for, so it's a title, a description and a way out.
+func _build_examine_panel() -> void:
+	examine_panel = Panel.new()
+	examine_panel.set_anchors_preset(Control.PRESET_CENTER)
+	examine_panel.size = Vector2(520, 300)
+	examine_panel.position = Vector2(-260, -150)
+	examine_panel.visible = false
+	ui_layer.add_child(examine_panel)
+
+	var vbox := VBoxContainer.new()
+	vbox.set_anchors_preset(Control.PRESET_FULL_RECT)
+	vbox.add_theme_constant_override("separation", 10)
+	vbox.offset_left = 18
+	vbox.offset_top = 14
+	vbox.offset_right = -18
+	vbox.offset_bottom = -14
+	examine_panel.add_child(vbox)
+
+	examine_title_label = Label.new()
+	examine_title_label.add_theme_font_size_override("font_size", 20)
+	examine_title_label.add_theme_color_override("font_color", Color(1, 0.85, 0.6))
+	vbox.add_child(examine_title_label)
+
+	examine_body = RichTextLabel.new()
+	examine_body.bbcode_enabled = true
+	examine_body.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	vbox.add_child(examine_body)
+
+	var close_button := Button.new()
+	close_button.text = "Done"
+	close_button.pressed.connect(close_examine)
+	vbox.add_child(close_button)
 
 
 func _build_dialogue_panel() -> void:
@@ -1306,6 +1442,27 @@ func _build_notes_panel() -> void:
 
 	notes_tab_buttons.clear()
 	notes_flag_dots.clear()
+
+	# Evidence sits above the suspects, and isn't one of them: it's the case
+	# file rather than an interview. Same tab machinery, reserved id.
+	var ev_row := HBoxContainer.new()
+	ev_row.add_theme_constant_override("separation", 6)
+	tabs_vbox.add_child(ev_row)
+	var ev_btn := Button.new()
+	ev_btn.text = "The Scene"
+	ev_btn.custom_minimum_size = Vector2(160, 36)
+	ev_btn.alignment = HORIZONTAL_ALIGNMENT_LEFT
+	ev_btn.add_theme_font_size_override("font_size", 16)
+	ev_btn.add_theme_color_override("font_color", Color(1, 0.85, 0.6))
+	ev_btn.add_theme_color_override("font_hover_color", Color(1, 0.85, 0.6))
+	ev_btn.add_theme_color_override("font_pressed_color", Color(1, 0.85, 0.6))
+	ev_btn.pressed.connect(func(): _select_notes_character(EVIDENCE_TAB))
+	ev_row.add_child(ev_btn)
+	notes_tab_buttons[EVIDENCE_TAB] = ev_btn
+
+	var sep := HSeparator.new()
+	tabs_vbox.add_child(sep)
+
 	for c in GameManager.active_characters():
 		var id: String = c["id"]
 		var color: Color = NPC_COLORS.get(id, Color.WHITE)
@@ -1775,6 +1932,14 @@ func _send_group_line() -> void:
 		return
 	group_input.text = ""
 
+	# Checked BEFORE command parsing, deliberately. "(Marcus, I hand you the
+	# letter)" contains a leading name and would otherwise be read as an order
+	# aimed at Marcus. A bracketed line is always a physical action, and always
+	# goes to the whole room - everyone present can see you do it.
+	if String(GameManager.parse_stage_action(text)["action"]) != "":
+		gc.submit_player_line(text)
+		return
+
 	var cmd := _parse_group_command(text)
 	var kind := String(cmd["kind"])
 	var id := String(cmd["id"])
@@ -1818,6 +1983,31 @@ func _send_group_line() -> void:
 ## the GameManager autoload and outlives the scene: a "Play Again" reload
 ## reconnects these signals in _ready(), well before _build_ui() has created the
 ## panel, and start_new_game() can emit state_changed in that window.
+## Renders a suspect's bracketed gesture - "(nods) I was in the study" - as
+## italics, so an action reads differently from speech in the log. Applied
+## after _colorize_names() rather than before; BBCode uses square brackets, so
+## a colour tag can never be mistaken for an action here.
+func _italicize_actions(text: String) -> String:
+	var out := ""
+	var depth := 0
+	for i in range(text.length()):
+		var ch := text[i]
+		if ch == "(":
+			if depth == 0:
+				out += "[i]("
+			else:
+				out += ch
+			depth += 1
+		elif ch == ")" and depth > 0:
+			depth -= 1
+			out += ")[/i]" if depth == 0 else ch
+		else:
+			out += ch
+	if depth > 0: # unclosed bracket - close the tag so it can't bleed
+		out += "[/i]"
+	return out
+
+
 func _on_group_line_added(entry: Dictionary) -> void:
 	if group_panel == null or not group_panel.visible:
 		return
@@ -1830,12 +2020,17 @@ func _on_group_line_added(entry: Dictionary) -> void:
 		# An order to the room, not a line of dialogue - dimmed so it reads as
 		# something you did rather than something you said.
 		group_log.append_text("[b]You:[/b] [i][color=#9aa0a6]%s[/color][/i]\n" % text)
+	elif kind == "action":
+		# Something you physically did. Italic like a stage direction, but kept
+		# under your name so it's clear who did it - and undimmed, because
+		# unlike an order it's a real event the room reacts to.
+		group_log.append_text("[b]You:[/b] [i]%s[/i]\n\n" % text)
 	elif speaker_id == "":
 		group_log.append_text("[b]You:[/b] %s\n\n" % text)
 	else:
 		var c := GameManager.get_character(speaker_id)
 		var col: Color = NPC_COLORS.get(speaker_id, Color(1, 0.82, 0.5))
-		group_log.append_text("[b][color=#%s]%s:[/color][/b] %s\n\n" % [col.to_html(false), String(c.get("short", "")), text])
+		group_log.append_text("[b][color=#%s]%s:[/color][/b] %s\n\n" % [col.to_html(false), String(c.get("short", "")), _italicize_actions(text)])
 
 
 func _on_group_turn_started(character_id: String) -> void:
@@ -1876,8 +2071,8 @@ func _append_transcript_entry(entry: Dictionary) -> void:
 		dialogue_log.append_text("[i][color=#9aa0a6]in the hall[/color][/i]\n")
 	var question := String(entry["question"])
 	if question != "":
-		dialogue_log.append_text("[b]You:[/b] %s\n" % _colorize_names(question))
-	dialogue_log.append_text("[b][color=#%s]%s:[/color][/b] %s\n\n" % [speaker_color.to_html(false), String(c.get("short", "")), _colorize_names(String(entry["answer"]))])
+		dialogue_log.append_text("[b]You:[/b] %s\n" % _italicize_actions(_colorize_names(question)))
+	dialogue_log.append_text("[b][color=#%s]%s:[/color][/b] %s\n\n" % [speaker_color.to_html(false), String(c.get("short", "")), _italicize_actions(_colorize_names(String(entry["answer"])))])
 
 
 func _send_question() -> void:
@@ -1888,10 +2083,15 @@ func _send_question() -> void:
 
 	# "Go to the library" / "wait in the study" etc. are handled locally as
 	# stage directions rather than sent to Ollama as an in-character question.
-	var move_room := _parse_move_command(q)
-	if move_room != "":
-		_handle_move_command(current_dialogue_character, move_room, q)
-		return
+	#
+	# Skipped entirely for a bracketed action: "(I walk Tom to the library)"
+	# contains "walk ... to ... library" and would otherwise be swallowed as a
+	# movement order instead of being roleplayed.
+	if String(GameManager.parse_stage_action(q)["action"]) == "":
+		var move_room := _parse_move_command(q)
+		if move_room != "":
+			_handle_move_command(current_dialogue_character, move_room, q)
+			return
 
 	dialogue_input.editable = false
 	dialogue_ask_button.disabled = true
@@ -1920,6 +2120,29 @@ func _on_ollama_error(character_id: String, message: String) -> void:
 		dialogue_status_label.text = "Error: " + message
 		dialogue_input.editable = true
 		dialogue_ask_button.disabled = false
+
+
+## Called by Evidence.interact(). Shows the description and files it in the
+## case notes the first time it's seen.
+func open_examine(node) -> void:
+	if examine_panel == null:
+		return
+	GameManager.note_evidence(String(node.evidence_id), String(node.title), String(node.examine_text))
+	examine_title_label.text = String(node.title).capitalize()
+	examine_body.clear()
+	examine_body.append_text(_colorize_names(String(node.examine_text)))
+	examine_panel.visible = true
+	hide_prompt()
+	if player:
+		player.set_mouse_captured(false)
+
+
+func close_examine() -> void:
+	if examine_panel == null:
+		return
+	examine_panel.visible = false
+	if player:
+		player.set_mouse_captured(true)
 
 
 func open_accusation() -> void:
@@ -1968,8 +2191,13 @@ func toggle_notes() -> void:
 		# Default to whichever suspect was showing last time, unless you
 		# haven't talked to them (or anyone) - then pick the first suspect
 		# with any conversation.
-		if notes_selected_char == "" or not GameManager.has_notes(notes_selected_char):
+		# has_notes() only means anything for a suspect - don't let it bounce
+		# you off the evidence tab, which has its own contents.
+		if notes_selected_char != EVIDENCE_TAB and (notes_selected_char == "" or not GameManager.has_notes(notes_selected_char)):
 			notes_selected_char = _first_interviewed_character()
+			# Nothing said to anyone yet, but you've been looking around.
+			if notes_selected_char == "" and not GameManager.evidence_found.is_empty():
+				notes_selected_char = EVIDENCE_TAB
 		_select_notes_character(notes_selected_char)
 		player.set_mouse_captured(false)
 	elif not dialogue_panel.visible and not accusation_panel.visible:
@@ -1990,7 +2218,9 @@ func _first_interviewed_character() -> String:
 func _select_notes_character(id: String) -> void:
 	notes_selected_char = id
 	_update_notes_tab_styles()
-	if id != "" and not _pending_summaries.has(id) and GameManager.needs_summary_refresh(id):
+	# The evidence pane is read straight out of what you've examined - there's
+	# nothing to summarize and nothing to ask Ollama for.
+	if id != EVIDENCE_TAB and id != "" and not _pending_summaries.has(id) and GameManager.needs_summary_refresh(id):
 		_pending_summaries[id] = true
 		GameManager.request_summary(id)
 	_render_notes_content(id)
@@ -2004,7 +2234,8 @@ func _select_notes_character(id: String) -> void:
 func _update_notes_tab_styles() -> void:
 	for id in notes_tab_buttons.keys():
 		var btn: Button = notes_tab_buttons[id]
-		var talked: bool = GameManager.has_notes(id)
+		# The evidence tab dims until you've actually examined something.
+		var talked: bool = (not GameManager.evidence_found.is_empty()) if id == EVIDENCE_TAB else GameManager.has_notes(id)
 		btn.modulate = Color(1, 1, 1, 1.0) if talked else Color(1, 1, 1, 0.4)
 
 		if id == notes_selected_char:
@@ -2016,7 +2247,7 @@ func _update_notes_tab_styles() -> void:
 
 		var dot: ColorRect = notes_flag_dots.get(id)
 		if dot:
-			dot.visible = _has_slipup_flag(id)
+			dot.visible = id != EVIDENCE_TAB and _has_slipup_flag(id)
 
 
 func _selected_tab_stylebox() -> StyleBoxFlat:
@@ -2068,8 +2299,32 @@ func _on_summary_error(character_id: String, _message: String) -> void:
 ## Slipups / Contradictions sections, a "Summarizing..." placeholder while one's
 ## in flight, or a raw transcript fallback if no summary is available (nothing
 ## asked yet, or the last summarization attempt failed).
+## The physical case file: everything you've examined, in the order you found
+## it. Unlike the suspect tabs this is never AI-summarized - it's what you saw
+## with your own eyes, so it's reproduced verbatim and can be trusted against
+## anything a suspect tells you.
+func _render_evidence_notes() -> void:
+	notes_log.append_text("[b][color=#ffd9a0]The Crime Scene[/color][/b]\n\n")
+	if GameManager.evidence_found.is_empty():
+		notes_log.append_text("[i]You haven't examined anything yet.[/i]\n\n")
+		notes_log.append_text("The body is somewhere in the manor. Find it, and look at what's around it - ")
+		notes_log.append_text("the weapon will tell you which room it was taken from, and that narrows down ")
+		notes_log.append_text("who could have taken it.")
+		return
+
+	notes_log.append_text("[color=#999999]%d thing%s examined. This is what you saw yourself - unlike an interview, none of it is anyone's word against anyone else's.[/color]\n\n" % [
+		GameManager.evidence_found.size(), "" if GameManager.evidence_found.size() == 1 else "s"])
+
+	for e in GameManager.evidence_found:
+		notes_log.append_text("[b][color=#ffd9a0]%s[/color][/b]\n" % String(e["title"]).capitalize())
+		notes_log.append_text("%s\n\n" % _colorize_names(String(e["text"])))
+
+
 func _render_notes_content(id: String) -> void:
 	notes_log.clear()
+	if id == EVIDENCE_TAB:
+		_render_evidence_notes()
+		return
 	if id == "":
 		notes_log.append_text("Talk to a suspect, then check back here.")
 		return
@@ -2119,7 +2374,7 @@ func _section_or_placeholder(text: String) -> String:
 # --------------------------------------------------------------- debug UI --
 # A dev/testing aid so you don't have to interrogate all 8 suspects just to
 # confirm the murderer logic is working. This is meant for testing only -
-# remove the F1 binding (in GameManager._setup_input_map) before sharing
+# remove the Ctrl+1 binding (in GameManager._setup_input_map) before sharing
 # builds with anyone you actually want to keep guessing.
 
 func toggle_debug() -> void:
@@ -2130,4 +2385,52 @@ func toggle_debug() -> void:
 
 func _refresh_debug_label() -> void:
 	var c := GameManager.get_character(GameManager.murderer_id)
-	debug_label.text = "[DEBUG] Murderer: %s\nWeapon: %s\nTime: %s" % [String(c.get("name", "?")), GameManager.murder_weapon, GameManager.murder_time]
+	var t := "[DEBUG] Case %s\nMurderer: %s\nWeapon: %s\nWhere: %s\nWhen: %s" % [
+		GameManager.case_code(), String(c.get("name", "?")), GameManager.murder_weapon,
+		GameManager.murder_room, GameManager.murder_time]
+
+	# The whole truth table, so a suspect's answer can be checked against what
+	# actually happened without digging through the console.
+	var case: Dictionary = GameManager.case_data
+	if case.is_empty():
+		debug_label.text = t + "\n(fallback scenario - no generated case)"
+		return
+
+	var w: Dictionary = case["weapon"]
+	var ms := int(case["murder_slot"])
+	t += "\nWeapon kept in: %s" % String(w["home_room"])
+	t += "\nMethod: %s" % String(case["method"])
+	t += "\nLie: claims %s for %s" % [
+		String(case["claimed_room"]),
+		CaseGenerator.block_time({"from_slot": int(case["diverge_from"]), "to_slot": int(case["diverge_to"])})]
+	var wits := []
+	for wid in case["witness_ids"]:
+		wits.append(String(GameManager.get_character(String(wid)).get("short", wid)))
+	t += "\nDisproved by: %s" % ", ".join(PackedStringArray(wits))
+
+	t += "\n\n%s" % "  ".join(PackedStringArray(CaseGenerator.SLOT_TIMES))
+	t += "\nVICTIM: %s" % _debug_path(Array(case["victim_path"]), ms)
+	for id in GameManager.active_character_ids:
+		var sid := String(id)
+		var sc := GameManager.get_character(sid)
+		var mark := " *" if sid == GameManager.murderer_id else ""
+		t += "\n%s%s: %s" % [String(sc.get("short", sid)), mark, _debug_path(Array(case["true_paths"][sid]), -1)]
+		if sid == GameManager.murderer_id:
+			t += "\n  claims: %s" % _debug_path(Array(case["claimed_paths"][sid]), -1)
+	debug_label.text = t
+
+
+## Compresses a schedule to initials so the whole cast fits in the overlay -
+## "DR Li Li Ha St St St St", with [] marking the murder slot.
+func _debug_path(path: Array, mark_slot: int) -> String:
+	var out := []
+	for i in range(path.size()):
+		var room := String(path[i])
+		var short_name := room.substr(0, 2)
+		var parts := room.split(" ")
+		if parts.size() > 1:
+			short_name = String(parts[0]).substr(0, 1) + String(parts[1]).substr(0, 1)
+		if i == mark_slot:
+			short_name = "[" + short_name + "]"
+		out.append(short_name)
+	return " ".join(PackedStringArray(out))

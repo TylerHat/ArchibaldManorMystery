@@ -53,18 +53,34 @@ view/UI stretch to fill whatever size you resize it to (no black bars).
   gather there (two of them; a third will refuse in character). Walk into
   the Hall yourself with both present and the interact prompt changes to
   **Address the room**. See "Confronting them together" below.
+- **Doing things, not just saying them** - put an action in round brackets and
+  it's treated as something you physically do, rather than words you say out
+  loud: `(I give Tom a high five)`, `(leans in) So where were you at eleven?`,
+  `(slides the photograph across the table)`. Suspects react to it as a real
+  event and can answer with a short gesture of their own - `(nods) I never left
+  the study`. Actions render in italics so they read differently from speech.
+
+  This works the same way in a private interview and in a Hall meetup. In the
+  Hall an action is always seen by the whole room, so everyone present reacts
+  to it - even if you named one person in the brackets.
+
+  It only covers things **you** do, right now. Claims about the past
+  (`(Victoria already confessed)`) are still refused by suspects who don't
+  remember them - that guard is what stops you inventing evidence, so it stays.
+  One quirk of the convention: a genuine aside like `I said (and I quote)
+  nothing` is read as an action, since there's no way to tell the two apart.
 - **Tab** - open/close your case notes. Each suspect gets their own tab
   down the left side; click one to see their notes on the right, organized
   into four sections:
   - **Timeline** - their claimed whereabouts/alibi around the time of the
 	murder
   - **Potential Reason to Kill** - any motive that's come up (grudges,
-    money, secrets, relationships)
+	money, secrets, relationships)
   - **Slipups** - anything suspicious, evasive, defensive, or inconsistent
-    in how they answered
+	in how they answered
   - **Contradictions** - points where their account conflicts with what
-    another guest said in front of them in the Hall, or where their public
-    story differs from what they told you privately
+	another guest said in front of them in the Hall, or where their public
+	story differs from what they told you privately
 
   This is AI-generated from that suspect's interview, filtering out small
   talk. Summaries are generated lazily, per tab: clicking a suspect's tab
@@ -78,7 +94,7 @@ view/UI stretch to fill whatever size you resize it to (no black bars).
   suspects you haven't talked to yet are dimmed, and a small red dot
   appears on any tab whose Slipups section has real content - so you can
   tell at a glance who's worth pressing further without opening every tab.
-- **F1** - toggle a debug overlay in the top-right corner that shows you
+- **Ctrl+1** - toggle a debug overlay in the top-right corner that shows you
   who the murderer is for the current game (plus the weapon/time flavor
   details), so you can test without interrogating all 8 suspects every
   time. The murderer is also printed to the Godot output console at
@@ -160,6 +176,103 @@ contradict them standing in the same room.
   tagged with who was standing there. That's what feeds the
   **Contradictions** section: a story told privately and then told
   differently in front of witnesses is exactly what you're hunting for.
+
+## Procedural cases (in progress)
+
+`PLAN_ProceduralCases.md` describes the work to make every playthrough generate
+its own murder - different room, weapon, method, time, and a real per-suspect
+schedule for the evening - rather than reusing one fixed scenario.
+
+**Phase 5 is in — the system is complete.** Every case now has a **case code**
+like `482913-171`, shown on the selection screen after each game, in the Ctrl+1
+overlay, in the console at startup, and at the top of the dialogue log. Paste it
+into the "Case code" box on the selection screen to play that exact mystery
+again — same murderer, same schedules, same weapon, same dropped item.
+
+The code carries the cast as well as the seed, and re-ticks the suspect boxes
+for you. That isn't cosmetic: the generator draws every decision from one RNG,
+so the same seed with a different set of suspects produces a completely
+different mystery. A seed alone would look reproducible and quietly not be.
+
+Dialogue logs now include the full **ground truth table** — every suspect's real
+movements slot by slot, plus the exact account each one was given. A line can
+only be called a hallucination against what that character was actually told, so
+the log is now self-contained: you can audit a conversation weeks later without
+having the game open.
+
+**Phase 4 is in.** Two things:
+
+**A "The Scene" tab** at the top of your case notes (Tab), holding everything
+you've examined, word for word. Unlike the suspect tabs it isn't AI-summarized
+— it's what you saw yourself, so you can trust it against anything you're told.
+
+**Dr Blackwood can narrow the time of death.** The body gives you a 90-minute
+window; she gives you a single half hour, which usually clears two or three
+people outright. She's the only character whose occupation lets her do this —
+so ask her about the body, whether or not you've seen it.
+
+Which also makes her the most dangerous person in the house when she's guilty.
+She'll lie about it with a straight professional face, and the lie is picked to
+put her somewhere she has a witness. The catch: her stated time won't fit the
+window the body itself suggests. Examine the body first and you can catch her
+without needing anyone's help.
+
+**Phase 3 is in.** The crime scene is now a real place you can walk into. The
+body lies in whichever room the generator chose, with the weapon beside it, and
+you can examine all of it:
+
+- **The body** - the wound, whether there was a struggle, and a *90-minute*
+  window for the time of death. Not the exact time; narrowing that is Phase 4.
+- **The weapon** - and, crucially, which room it's normally kept in. Whoever
+  used it went there first. There's a matching clue in that room: an empty
+  table where it should be. Two ends of the same thread.
+- **A dropped personal item** belonging to one of the guests. Half the time
+  it's the murderer's; the rest of the time it belongs to an innocent who
+  genuinely was in that room earlier and will say so. It's a conversation
+  starter, not an answer.
+- **Marks on the floor**, and an overturned chair if there was a fight.
+
+Walk up to anything and press **E**. Examined evidence is remembered for the
+case notes (Phase 4 puts it on screen).
+
+**Phase 2b is in.** Suspects now answer from a real timeline instead of making
+it up. Ask anyone where they were at half past ten and you get the same answer
+every time, because it's read off a generated schedule rather than invented.
+Every innocent tells the truth; exactly one person in the house is lying, about
+exactly one half-hour block, and at least one innocent was standing in the room
+they claim and will say so if you put the two of them in the Hall together.
+
+That's the point of the whole system: before this, two suspects contradicting
+each other meant nothing, because both were improvising.
+
+**Phase 2a** put the generated case into the game: the murder room,
+weapon, method and time change every launch, and each suspect stands in the
+room their schedule ended the night in rather than a fixed home room. Two
+suspects can share a room, and some rooms will be empty - that's the schedule
+showing through. The story is now that the body was found the *next morning*
+and nobody has been allowed to leave, which is why everyone is still where they
+spent the evening.
+
+Suspects don't yet know their own schedules - ask one where they were and
+they'll still improvise. That's Phase 2b.
+
+Press **Ctrl+1** for the full truth table: the murderer, weapon and its home room,
+the lie they're telling, who can disprove it, and every suspect's movements
+slot by slot (rooms abbreviated to two letters, `[]` marking the murder).
+
+**Phase 1** is the generator underneath it. `Scripts/CaseGenerator.gd`
+builds and validates a complete case: 8 slots of 30 minutes from 8:00pm to
+midnight, everyone at dinner in the Dining Room for the first slot, then a
+walkable path per suspect through the mansion. It guarantees the murderer had
+means (they passed through the room the weapon is kept in), opportunity (alone
+with the victim), and a catchable lie (at least one innocent was actually in
+the room the murderer claims to have been in).
+
+To check it, open `Scenes/CaseGeneratorTest.tscn` and press **F6**. It builds
+1000 cases, asserts every rule, prints distribution stats, and dumps three full
+sample cases - including a preview of the schedule text each suspect will
+eventually be given. Expect `1000/1000 valid`. Playing the game normally is
+completely unaffected by this scene.
 
 ## Design notes / assumptions
 
