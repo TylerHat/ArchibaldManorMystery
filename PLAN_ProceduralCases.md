@@ -79,6 +79,13 @@ suspects can genuinely have seen him alive after another claims he'd gone up.
 5. **Nobody else is in that room** at that slot.
 6. **The murderer passes through the weapon's home room** beforehand.
 7. **Corroboration** — two people in a room in the same slot alibi each other.
+8. **The sealed room** — from the murder slot onwards, *nobody* is in the murder
+   room again, the murderer included. The killer shuts the door behind him and
+   the body isn't found until morning. Without this, ~2 suspect-slots per case
+   had someone strolling through a room with an undiscovered corpse in it and
+   never mentioning it, which is the kind of thing a player notices immediately
+   in the Ctrl+1 timeline. Costs almost nothing: mean attempts 2.79 → 2.98,
+   still 100% valid over 5,000 cases.
 
 ### The solvability rule
 
@@ -200,10 +207,13 @@ The personal item is a coin flip between the murderer and an innocent who
 would be the game itself lying to the player.
 
 One thing measurement caught: in 65% of generated cases at least one suspect
-ends the night standing in the murder room (up to three of them). The scene is
+ended the night standing in the murder room (up to three of them). The scene is
 therefore pushed to a room corner, ~3.9 units out, clear of both the walls and
 the ~3.0 ring `_spawn_npcs()` fans suspects onto. Placed centrally it would
-have spawned suspects inside the body most games.
+have spawned suspects inside the body most games. The sealed-room constraint
+(#8 above) since dropped that figure to zero — nobody's schedule can end in the
+murder room any more — but the corner placement stays, since it also keeps the
+body clear of the walls and of the player's own spawn.
 
 **Test:** find the body in the generated murder room, examine everything, check
 descriptions agree with the Ctrl+1 truth table. Then go to the weapon's home room
