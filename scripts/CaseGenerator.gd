@@ -433,8 +433,33 @@ static func generate(active_ids: Array, rng: RandomNumberGenerator = null) -> Di
 		if witnesses.is_empty():
 			continue
 
+		# Whose belonging is found at the scene. Half the time the murderer's;
+		# otherwise an innocent who genuinely passed through that room, so
+		# their explanation checks out and the item is a red herring rather
+		# than a lie the game is telling.
+		#
+		# Drawn from the case RNG rather than a global one on purpose: this is
+		# a fact of the mystery, not set dressing, so replaying a case code has
+		# to produce the same item. Anything the player reasons about belongs
+		# in here.
+		var item_candidates := []
+		for pid in innocents:
+			if Array(true_paths[pid]).has(murder_room):
+				item_candidates.append(pid)
+		# Weighted 4-in-5 toward the innocent, not a straight coin flip. An
+		# innocent only passes through the murder room in about 64% of cases,
+		# so every time there's no candidate this falls back to the murderer -
+		# an even flip on top of that lands at 69% murderer overall, which
+		# makes the item close to a pointer at the killer. Leaning the other
+		# way brings it back to roughly 50/50, which is what a red herring
+		# needs to be: informative, but not something you can act on alone.
+		var evidence_owner := murderer
+		if not item_candidates.is_empty() and rng.randi() % 5 != 0:
+			evidence_owner = String(item_candidates[rng.randi() % item_candidates.size()])
+
 		return {
 			"murderer_id": murderer,
+			"evidence_owner_id": evidence_owner,
 			"murder_slot": murder_slot,
 			"murder_room": murder_room,
 			"weapon": weapon,

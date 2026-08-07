@@ -291,10 +291,52 @@ The body says he died between <WINDOW>. Your time doesn't fit that.
 
 ## Not implemented yet — don't report these
 
-These are Phase 5 and are *expected* to be missing:
+## Test 6 — Phase 5: case codes and logs
 
-- No seed display, no seed entry — you can't replay or report a specific case
-- The dialogue log doesn't record the truth table alongside the transcript
+### Replaying a case
+
+Play a game, then note the code from the **Ctrl+1** overlay (top line) or the
+console at startup.
+
+- [ ] Hit **Play Again**. The selection screen shows **"Last case: ..."** with
+      that same code
+- [ ] Paste it into the **Case code** box. The status next to it reads `ok`,
+      and **the suspect checkboxes change by themselves** to match the code
+- [ ] Start. Press **Ctrl+1** — same murderer, same weapon, same murder room,
+      same schedules as before
+- [ ] Walk to the crime scene: the **dropped item is the same one**
+- [ ] Type nonsense into the box — status reads `not a valid code`, and Start
+      still works (it just gives you a fresh case)
+
+### Same seed, different cast
+
+- [ ] Enter a code, then manually tick one *extra* suspect before starting
+- [ ] The mystery is **different**. That's correct and expected — the cast is
+      part of what the seed generates against, which is why the code carries it
+
+### The log
+
+Turn the dialogue log on, play briefly, then open the file in `DialogueLogs/`.
+
+- [ ] The case code is at the top
+- [ ] There's a **"Ground truth"** section with a grid of every suspect's
+      movements, the murderer's claimed row beneath their real one, and the
+      exact account each suspect was given
+- [ ] Pick any answer a suspect gave in the transcript and check it against
+      that table without needing the game open
+
+---
+
+## Not implemented yet — don't report these
+
+All five phases are in. Still out of scope by design (see
+`PLAN_ProceduralCases.md` §8):
+
+- **Motives don't vary** — each character keeps their one fixed trait, so the
+  murderer's motive is the same every game they're guilty
+- No generated relationships between suspects
+- Contradiction detection in the notes is still LLM-driven, not code-verified
+- Winning requires naming the killer only — not the weapon or room
 - Suspects don't know about the physical evidence — examining the dropped item
   doesn't let you confront its owner with it in any mechanical sense (you can
   still ask, they just have no special knowledge of it)

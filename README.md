@@ -183,6 +183,23 @@ contradict them standing in the same room.
 its own murder - different room, weapon, method, time, and a real per-suspect
 schedule for the evening - rather than reusing one fixed scenario.
 
+**Phase 5 is in — the system is complete.** Every case now has a **case code**
+like `482913-171`, shown on the selection screen after each game, in the Ctrl+1
+overlay, in the console at startup, and at the top of the dialogue log. Paste it
+into the "Case code" box on the selection screen to play that exact mystery
+again — same murderer, same schedules, same weapon, same dropped item.
+
+The code carries the cast as well as the seed, and re-ticks the suspect boxes
+for you. That isn't cosmetic: the generator draws every decision from one RNG,
+so the same seed with a different set of suspects produces a completely
+different mystery. A seed alone would look reproducible and quietly not be.
+
+Dialogue logs now include the full **ground truth table** — every suspect's real
+movements slot by slot, plus the exact account each one was given. A line can
+only be called a hallucination against what that character was actually told, so
+the log is now self-contained: you can audit a conversation weeks later without
+having the game open.
+
 **Phase 4 is in.** Two things:
 
 **A "The Scene" tab** at the top of your case notes (Tab), holding everything

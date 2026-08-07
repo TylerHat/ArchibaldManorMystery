@@ -238,7 +238,33 @@ murderer her "expert" narrowing is a lie the physical evidence disagrees with.
 **Test:** examine the body, ask Evelyn, confirm she narrows correctly — or
 lies in her own favour when guilty.
 
-### Phase 5 — Polish
+### Phase 5 — Polish ✅ DONE
+
+**Case codes** (`482913-171`): seed plus a bitmask of the cast. The mask is
+load-bearing, not decorative — the generator draws every decision from one RNG,
+so the same seed with a different set of suspects yields a different mystery.
+Entering a code re-ticks the suspect boxes automatically. Verified over 300
+trials that seed + cast reproduces a case exactly, and that changing the cast
+changes it.
+
+Shown on the selection screen (last game's code), in the Ctrl+1 overlay, in the
+startup console line, and at the top of every dialogue log.
+
+**Dialogue logs carry the truth table**: the full slot-by-slot grid for every
+suspect and the victim, the murderer's claimed row beneath their real one, and
+the verbatim account each suspect was given. Without it a log only shows what
+was *said*, with no way to tell an accurate answer from a hallucination later.
+
+One thing this surfaced: the dropped personal item was being chosen with a
+global `randi()` in `CrimeScene`, so a replayed code produced a *different*
+item. It's a clue the player reasons about, so it moved into the generator and
+into `case_data` as `evidence_owner_id`. Measuring it then showed it pointed at
+the murderer 69% of the time — an innocent only passes through the murder room
+in 64% of cases, and every miss fell back to the murderer. Now weighted 4-in-5
+toward the innocent, which lands at ~50/50: informative, but not actionable
+alone.
+
+### Phase 5 (original scope) — Polish
 
 Seed display and seed entry on the selection screen (replay a case, or report a
 bad one). Dialogue log records the truth table alongside the transcript.

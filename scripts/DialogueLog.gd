@@ -77,6 +77,7 @@ static func _header(gm) -> String:
 
 	var out := "# Archibald Manor - Dialogue Log\n\n"
 	out += "- **Generated:** %s\n" % Time.get_datetime_string_from_system(false, true)
+	out += "- **Case code:** `%s` (paste on the selection screen to replay this exact case)\n" % gm.case_code()
 	out += "- **Model:** `%s`\n" % gm.OLLAMA_MODEL
 	out += "- **Context window:** %d tokens\n" % gm.OLLAMA_NUM_CTX
 	out += "- **Murderer (ground truth):** %s\n" % String(murderer.get("name", "?"))
@@ -88,7 +89,70 @@ static func _header(gm) -> String:
 	out += "> section header, because a line can only be called a hallucination against what\n"
 	out += "> that character was actually told. Check every claim against the briefing and\n"
 	out += "> against who was present.\n\n"
+	out += _truth_table(gm)
 	out += "---\n\n"
+	return out
+
+
+## The generated timeline, written out in full alongside the transcript.
+##
+## Without it a log is only half useful: you can see a suspect said they were
+## in the Study at ten, but not whether that was true, so there's no way to
+## tell a hallucination from an accurate answer weeks later. With it, every
+## claim in the transcript below can be checked against a single table.
+static func _truth_table(gm) -> String:
+	var case: Dictionary = gm.case_data
+	if case.is_empty():
+		return "_No generated case (fallback scenario in use)._\n\n"
+
+	var weapon: Dictionary = case["weapon"]
+	var ms := int(case["murder_slot"])
+	var out := "## Ground truth - what actually happened\n\n"
+	out += "- **Killed:** in the %s at %s, with %s\n" % [
+		String(case["murder_room"]), CaseGenerator.SLOT_TIMES[ms], String(weapon["name"])]
+	out += "- **Weapon normally kept in:** the %s\n" % String(weapon["home_room"])
+	out += "- **Method:** %s\n" % String(case["method"])
+	out += "- **The lie:** %s claims the %s for %s (really the %s)\n" % [
+		String(gm.get_character(String(case["murderer_id"])).get("short", "?")),
+		String(case["claimed_room"]),
+		CaseGenerator.block_time({"from_slot": int(case["diverge_from"]), "to_slot": int(case["diverge_to"])}),
+		String(case["true_paths"][case["murderer_id"]][ms])]
+	var wits := []
+	for wid in case["witness_ids"]:
+		wits.append(String(gm.get_character(String(wid)).get("short", wid)))
+	out += "- **Disproved by:** %s\n\n" % ", ".join(PackedStringArray(wits))
+
+	# Grid first - fastest way to check "was anyone else in that room?" - then
+	# the per-suspect account, which is the exact wording they were given and
+	# therefore what their answers should be compared against.
+	out += "### Where everyone was\n\n"
+	out += "| | %s |\n" % " | ".join(PackedStringArray(CaseGenerator.SLOT_TIMES))
+	out += "|---|%s\n" % "---|".repeat(CaseGenerator.SLOT_COUNT)
+	out += "| **%s** (victim) | %s |\n" % [gm.VICTIM_NAME, " | ".join(PackedStringArray(_cells(Array(case["victim_path"]), ms)))]
+	for id in gm.active_character_ids:
+		var sid := String(id)
+		var label := String(gm.get_character(sid).get("short", sid))
+		if sid == String(case["murderer_id"]):
+			label += " **(murderer)**"
+		out += "| %s | %s |\n" % [label, " | ".join(PackedStringArray(_cells(Array(case["true_paths"][sid]), -1)))]
+		if sid == String(case["murderer_id"]):
+			out += "| _...claims_ | %s |\n" % " | ".join(PackedStringArray(_cells(Array(case["claimed_paths"][sid]), -1)))
+	out += "\n"
+
+	out += "### The account each suspect was given\n\n"
+	out += "Anything they said that isn't in here is invented.\n\n"
+	for id in gm.active_character_ids:
+		var sid2 := String(id)
+		out += "**%s**\n\n```\n%s```\n\n" % [
+			String(gm.get_character(sid2).get("name", sid2)), gm.evening_account(sid2)]
+	return out
+
+
+static func _cells(path: Array, mark_slot: int) -> Array:
+	var out := []
+	for i in range(path.size()):
+		var cell := String(path[i])
+		out.append("**%s**" % cell if i == mark_slot else cell)
 	return out
 
 

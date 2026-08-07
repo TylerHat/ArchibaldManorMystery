@@ -176,6 +176,14 @@ var debug_dump_group: bool = false
 var dialogue_log_enabled: bool = false
 var dialogue_log_path: String = "" # res:// or user:// path for this session, "" when off
 
+## Seed for this playthrough's case. Set from the selection screen to replay a
+## specific mystery; 0 means "pick a fresh one". Kept small (under a million)
+## purely so the shareable code is short enough to read aloud or type from a
+## screenshot - a million cases per cast is far more than anyone will play.
+const MAX_SEED := 1000000
+var case_seed: int = 0
+var requested_seed: int = 0 # 0 = generate a new one
+
 var murderer_id: String = ""
 var murder_weapon: String = ""
 var murder_time: String = ""
@@ -287,7 +295,16 @@ func start_new_game(character_ids: Array = []) -> void:
 	var ids := []
 	for c in pool:
 		ids.append(String(c["id"]))
-	case_data = CaseGenerator.generate(ids)
+
+	# Same seed + same cast = the same mystery, because the generator draws
+	# every decision from this one RNG. The cast is part of it: change who's in
+	# the house and the same seed produces something different, which is why
+	# the shareable code carries both (see case_code()).
+	case_seed = requested_seed if requested_seed > 0 else (randi() % MAX_SEED) + 1
+	requested_seed = 0 # one-shot; a later restart re-rolls unless asked again
+	var rng := RandomNumberGenerator.new()
+	rng.seed = case_seed
+	case_data = CaseGenerator.generate(ids, rng)
 
 	if case_data.is_empty():
 		push_warning("CaseGenerator failed - falling back to the fixed scenario.")
@@ -315,6 +332,7 @@ func start_new_game(character_ids: Array = []) -> void:
 		_histories[c["id"]] = [{"role": "system", "content": _build_system_prompt(c["id"])}]
 
 	var mc := get_character(murderer_id)
+	print("[DEBUG] Case code: %s  (paste this on the selection screen to replay this exact mystery)" % case_code())
 	print("[DEBUG] Murderer this game: %s (id=%s) - used %s in %s, %s. Press Ctrl+1 in-game for the full timeline." % [mc.get("name", "?"), murderer_id, murder_weapon, murder_room, murder_time])
 	if not case_data.is_empty():
 		print("[DEBUG] Weapon kept in the %s. %s claims the %s; disproved by %d witness(es). Generated in %d attempt(s)." % [
@@ -348,6 +366,53 @@ func active_characters() -> Array:
 		if active_character_ids.has(c["id"]):
 			out.append(c)
 	return out
+
+
+# ------------------------------------------------------------- case codes --
+
+## "482913-171" - the seed, then a bitmask of which suspects were in the house.
+##
+## The cast has to be in the code. The generator makes every decision from one
+## RNG, so the same seed with a different set of suspects produces a completely
+## different mystery - a seed on its own would look reproducible and quietly
+## not be. Encoding both means one string restores the exact case.
+func case_code() -> String:
+	var mask := 0
+	for i in range(CHARACTERS.size()):
+		if active_character_ids.has(String(CHARACTERS[i]["id"])):
+			mask |= 1 << i
+	return "%d-%d" % [case_seed, mask]
+
+
+## Parses a code back into {"seed": int, "ids": Array}. Returns {} if it can't
+## be read, so the caller can just ignore bad input rather than validating it
+## twice. A bare seed with no cast is accepted too - the player keeps whatever
+## suspects they've ticked.
+func parse_case_code(code: String) -> Dictionary:
+	var text := code.strip_edges()
+	if text == "":
+		return {}
+	var parts := text.split("-")
+	if parts.size() > 2:
+		return {}
+	if not String(parts[0]).is_valid_int():
+		return {}
+	var out_seed := int(String(parts[0]))
+	if out_seed <= 0 or out_seed >= MAX_SEED:
+		return {}
+	if parts.size() == 1:
+		return {"seed": out_seed, "ids": []}
+
+	if not String(parts[1]).is_valid_int():
+		return {}
+	var mask := int(String(parts[1]))
+	var ids := []
+	for i in range(CHARACTERS.size()):
+		if mask & (1 << i):
+			ids.append(String(CHARACTERS[i]["id"]))
+	if ids.size() < 2:
+		return {}
+	return {"seed": out_seed, "ids": ids}
 
 
 ## Records a piece of evidence the first time the detective examines it.

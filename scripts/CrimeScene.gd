@@ -136,22 +136,9 @@ static func _build_weapon_gap(main: Node3D, root: Node3D, case: Dictionary, weap
 ## earlier in the evening and can say so truthfully. That ambiguity is the
 ## point - physical evidence should start a conversation, not end the game.
 static func _build_personal_item(main: Node3D, root: Node3D, case: Dictionary, pos: Vector3) -> void:
-	var murderer := String(case["murderer_id"])
-	var owner_id := murderer
-
-	var innocents_seen := []
-	for pid in case["true_paths"].keys():
-		if String(pid) == murderer:
-			continue
-		if Array(case["true_paths"][pid]).has(String(case["murder_room"])):
-			innocents_seen.append(String(pid))
-
-	# Coin flip, but only when there's an innocent whose presence in this room
-	# is genuine - planting an item belonging to someone who was never here
-	# would be a lie the game itself is telling.
-	if not innocents_seen.is_empty() and randi() % 2 == 0:
-		owner_id = String(innocents_seen[randi() % innocents_seen.size()])
-
+	# Chosen by the generator, not here, so that replaying a case code produces
+	# the same item - it's a clue the player reasons about, not decoration.
+	var owner_id := String(case.get("evidence_owner_id", case["murderer_id"]))
 	var item := String(PERSONAL_ITEMS.get(owner_id, "a personal effect"))
 	var node: StaticBody3D = main.add_solid_box(root, "PersonalItem", Vector3(0.32, 0.1, 0.32), pos + Vector3(0, 0.05, 0), ITEM_COLOR)
 	var t := "%s, on the floor near the body.\n\n" % _capitalise(item)

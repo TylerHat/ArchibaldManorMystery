@@ -142,6 +142,8 @@ var selection_checkboxes: Dictionary = {} # character_id -> CheckBox
 var selection_count_label: Label
 var selection_start_button: Button
 var selection_log_checkbox: CheckBox
+var selection_seed_input: LineEdit
+var selection_seed_status: Label
 
 
 func _ready() -> void:
@@ -285,6 +287,36 @@ func _build_selection_screen() -> void:
 	log_hint.add_theme_color_override("font_color", Color(1, 1, 1, 0.55))
 	vbox.add_child(log_hint)
 
+	# Case code. Blank means a fresh mystery, which is the normal path - this
+	# is for replaying one you liked, or handing me one that went wrong.
+	var code_row := HBoxContainer.new()
+	code_row.add_theme_constant_override("separation", 8)
+	vbox.add_child(code_row)
+
+	var code_label := Label.new()
+	code_label.text = "Case code (optional):"
+	code_row.add_child(code_label)
+
+	selection_seed_input = LineEdit.new()
+	selection_seed_input.placeholder_text = "leave blank for a new mystery"
+	selection_seed_input.custom_minimum_size = Vector2(220, 0)
+	selection_seed_input.tooltip_text = "Paste a code from a previous game to play that exact case again - same murderer, same schedules, same weapon. The code includes which suspects were in the house, so it will re-tick them for you."
+	selection_seed_input.text_changed.connect(_on_seed_input_changed)
+	code_row.add_child(selection_seed_input)
+
+	selection_seed_status = Label.new()
+	selection_seed_status.add_theme_font_size_override("font_size", 12)
+	code_row.add_child(selection_seed_status)
+
+	# The code from the game you just finished, so "that was a good one" is
+	# recoverable after the fact rather than needing foresight.
+	if GameManager.case_seed > 0:
+		var last := Label.new()
+		last.text = "Last case: %s" % GameManager.case_code()
+		last.add_theme_font_size_override("font_size", 12)
+		last.add_theme_color_override("font_color", Color(1, 1, 1, 0.55))
+		vbox.add_child(last)
+
 	var button_row := HBoxContainer.new()
 	button_row.add_theme_constant_override("separation", 10)
 	vbox.add_child(button_row)
@@ -305,6 +337,28 @@ func _build_selection_screen() -> void:
 	button_row.add_child(selection_start_button)
 
 	_update_selection_count()
+
+
+## Live feedback as the code is typed, and - the useful part - re-ticking the
+## suspects the code was generated with. Getting the cast wrong silently
+## produces a different mystery under the same seed, so it can't be left to the
+## player to remember who was in the house.
+func _on_seed_input_changed(text: String) -> void:
+	if text.strip_edges() == "":
+		selection_seed_status.text = ""
+		return
+	var parsed := GameManager.parse_case_code(text)
+	if parsed.is_empty():
+		selection_seed_status.text = "not a valid code"
+		selection_seed_status.add_theme_color_override("font_color", Color(1, 0.5, 0.5))
+		return
+	selection_seed_status.text = "ok"
+	selection_seed_status.add_theme_color_override("font_color", Color(0.5, 1, 0.6))
+	var ids: Array = parsed["ids"]
+	if not ids.is_empty():
+		for id in selection_checkboxes.keys():
+			selection_checkboxes[id].button_pressed = ids.has(String(id))
+		_update_selection_count()
 
 
 func _random_select(n: int) -> void:
@@ -355,6 +409,16 @@ func _on_start_pressed() -> void:
 	if selection_log_checkbox != null:
 		GameManager.dialogue_log_enabled = selection_log_checkbox.button_pressed
 	selection_log_checkbox = null
+
+	# An unreadable code is ignored rather than blocking the button - the
+	# status label next to the field already said so while it was being typed.
+	GameManager.requested_seed = 0
+	if selection_seed_input != null:
+		var parsed := GameManager.parse_case_code(selection_seed_input.text)
+		if not parsed.is_empty():
+			GameManager.requested_seed = int(parsed["seed"])
+	selection_seed_input = null
+	selection_seed_status = null
 
 	selection_layer.queue_free()
 	selection_layer = null
@@ -2321,8 +2385,8 @@ func toggle_debug() -> void:
 
 func _refresh_debug_label() -> void:
 	var c := GameManager.get_character(GameManager.murderer_id)
-	var t := "[DEBUG] Murderer: %s\nWeapon: %s\nWhere: %s\nWhen: %s" % [
-		String(c.get("name", "?")), GameManager.murder_weapon,
+	var t := "[DEBUG] Case %s\nMurderer: %s\nWeapon: %s\nWhere: %s\nWhen: %s" % [
+		GameManager.case_code(), String(c.get("name", "?")), GameManager.murder_weapon,
 		GameManager.murder_room, GameManager.murder_time]
 
 	# The whole truth table, so a suspect's answer can be checked against what
