@@ -120,6 +120,10 @@ var notes_log: RichTextLabel
 var notes_tab_buttons: Dictionary = {} # character_id -> Button
 var notes_flag_dots: Dictionary = {} # character_id -> ColorRect (shown when Slipups has real content)
 var notes_selected_char: String = ""
+
+## Reserved tab id for the crime-scene evidence pane. Not a character, so
+## anything that treats a tab id as a suspect has to skip it.
+const EVIDENCE_TAB := "__evidence__"
 var _pending_summaries: Dictionary = {} # character_id -> true while a summary request is in flight
 
 var win_panel: Panel
@@ -1374,6 +1378,27 @@ func _build_notes_panel() -> void:
 
 	notes_tab_buttons.clear()
 	notes_flag_dots.clear()
+
+	# Evidence sits above the suspects, and isn't one of them: it's the case
+	# file rather than an interview. Same tab machinery, reserved id.
+	var ev_row := HBoxContainer.new()
+	ev_row.add_theme_constant_override("separation", 6)
+	tabs_vbox.add_child(ev_row)
+	var ev_btn := Button.new()
+	ev_btn.text = "The Scene"
+	ev_btn.custom_minimum_size = Vector2(160, 36)
+	ev_btn.alignment = HORIZONTAL_ALIGNMENT_LEFT
+	ev_btn.add_theme_font_size_override("font_size", 16)
+	ev_btn.add_theme_color_override("font_color", Color(1, 0.85, 0.6))
+	ev_btn.add_theme_color_override("font_hover_color", Color(1, 0.85, 0.6))
+	ev_btn.add_theme_color_override("font_pressed_color", Color(1, 0.85, 0.6))
+	ev_btn.pressed.connect(func(): _select_notes_character(EVIDENCE_TAB))
+	ev_row.add_child(ev_btn)
+	notes_tab_buttons[EVIDENCE_TAB] = ev_btn
+
+	var sep := HSeparator.new()
+	tabs_vbox.add_child(sep)
+
 	for c in GameManager.active_characters():
 		var id: String = c["id"]
 		var color: Color = NPC_COLORS.get(id, Color.WHITE)
@@ -2102,8 +2127,13 @@ func toggle_notes() -> void:
 		# Default to whichever suspect was showing last time, unless you
 		# haven't talked to them (or anyone) - then pick the first suspect
 		# with any conversation.
-		if notes_selected_char == "" or not GameManager.has_notes(notes_selected_char):
+		# has_notes() only means anything for a suspect - don't let it bounce
+		# you off the evidence tab, which has its own contents.
+		if notes_selected_char != EVIDENCE_TAB and (notes_selected_char == "" or not GameManager.has_notes(notes_selected_char)):
 			notes_selected_char = _first_interviewed_character()
+			# Nothing said to anyone yet, but you've been looking around.
+			if notes_selected_char == "" and not GameManager.evidence_found.is_empty():
+				notes_selected_char = EVIDENCE_TAB
 		_select_notes_character(notes_selected_char)
 		player.set_mouse_captured(false)
 	elif not dialogue_panel.visible and not accusation_panel.visible:
@@ -2124,7 +2154,9 @@ func _first_interviewed_character() -> String:
 func _select_notes_character(id: String) -> void:
 	notes_selected_char = id
 	_update_notes_tab_styles()
-	if id != "" and not _pending_summaries.has(id) and GameManager.needs_summary_refresh(id):
+	# The evidence pane is read straight out of what you've examined - there's
+	# nothing to summarize and nothing to ask Ollama for.
+	if id != EVIDENCE_TAB and id != "" and not _pending_summaries.has(id) and GameManager.needs_summary_refresh(id):
 		_pending_summaries[id] = true
 		GameManager.request_summary(id)
 	_render_notes_content(id)
@@ -2138,7 +2170,8 @@ func _select_notes_character(id: String) -> void:
 func _update_notes_tab_styles() -> void:
 	for id in notes_tab_buttons.keys():
 		var btn: Button = notes_tab_buttons[id]
-		var talked: bool = GameManager.has_notes(id)
+		# The evidence tab dims until you've actually examined something.
+		var talked: bool = (not GameManager.evidence_found.is_empty()) if id == EVIDENCE_TAB else GameManager.has_notes(id)
 		btn.modulate = Color(1, 1, 1, 1.0) if talked else Color(1, 1, 1, 0.4)
 
 		if id == notes_selected_char:
@@ -2150,7 +2183,7 @@ func _update_notes_tab_styles() -> void:
 
 		var dot: ColorRect = notes_flag_dots.get(id)
 		if dot:
-			dot.visible = _has_slipup_flag(id)
+			dot.visible = id != EVIDENCE_TAB and _has_slipup_flag(id)
 
 
 func _selected_tab_stylebox() -> StyleBoxFlat:
@@ -2202,8 +2235,32 @@ func _on_summary_error(character_id: String, _message: String) -> void:
 ## Slipups / Contradictions sections, a "Summarizing..." placeholder while one's
 ## in flight, or a raw transcript fallback if no summary is available (nothing
 ## asked yet, or the last summarization attempt failed).
+## The physical case file: everything you've examined, in the order you found
+## it. Unlike the suspect tabs this is never AI-summarized - it's what you saw
+## with your own eyes, so it's reproduced verbatim and can be trusted against
+## anything a suspect tells you.
+func _render_evidence_notes() -> void:
+	notes_log.append_text("[b][color=#ffd9a0]The Crime Scene[/color][/b]\n\n")
+	if GameManager.evidence_found.is_empty():
+		notes_log.append_text("[i]You haven't examined anything yet.[/i]\n\n")
+		notes_log.append_text("The body is somewhere in the manor. Find it, and look at what's around it - ")
+		notes_log.append_text("the weapon will tell you which room it was taken from, and that narrows down ")
+		notes_log.append_text("who could have taken it.")
+		return
+
+	notes_log.append_text("[color=#999999]%d thing%s examined. This is what you saw yourself - unlike an interview, none of it is anyone's word against anyone else's.[/color]\n\n" % [
+		GameManager.evidence_found.size(), "" if GameManager.evidence_found.size() == 1 else "s"])
+
+	for e in GameManager.evidence_found:
+		notes_log.append_text("[b][color=#ffd9a0]%s[/color][/b]\n" % String(e["title"]).capitalize())
+		notes_log.append_text("%s\n\n" % _colorize_names(String(e["text"])))
+
+
 func _render_notes_content(id: String) -> void:
 	notes_log.clear()
+	if id == EVIDENCE_TAB:
+		_render_evidence_notes()
+		return
 	if id == "":
 		notes_log.append_text("Talk to a suspect, then check back here.")
 		return

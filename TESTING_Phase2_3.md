@@ -30,6 +30,9 @@ Open `Scenes/CaseGeneratorTest.tscn`, press **F6**, read the Godot output.
 - [ ] Says `1000/1000 valid`
 - [ ] `room grid matches Main.gd  OK`
 - [ ] "schedule lines per suspect" is roughly **5–6 mean, 8 max**
+- [ ] Under **"who ends up guilty"**, every suspect's percentage is in normal
+      range and the last line reads `murderer draw is uniform`. If any row is
+      flagged `<-- SKEWED`, the murderer selection is biased — report it
 - [ ] In the sample cases, the **COVER STORY** and **THE WITNESS** blocks both
       have a line marked `<-- at the murder`, and they disagree: the murderer
       claims a room, the witness is in that same room at that moment *without*
@@ -229,6 +232,53 @@ Go to the weapon's home room.
 
 ---
 
+## Test 4.5 — Phase 4: evidence notes and the pathologist
+
+**Include Evelyn Blackwood in your cast for this one.**
+
+### The Scene tab
+
+Press **Tab**. Above the suspects there's a **The Scene** tab.
+
+- [ ] Before examining anything, it's dimmed and tells you to go find the body
+- [ ] After examining things, it lists them in the order you found them, in
+      full — not summarized
+- [ ] It doesn't pause to "think" the way a suspect tab does (nothing is sent
+      to Ollama for this pane)
+
+### Evelyn, innocent
+
+Check Ctrl+1 — she should **not** be the murderer for this part. Ask her:
+
+```
+You examined the body. When did he die?
+```
+
+- [ ] She gives a **specific half-hour time**, not a range
+- [ ] It matches the true murder time in Ctrl+1
+- [ ] That time falls inside the 90-minute window the body itself gave you
+
+### Evelyn, guilty
+
+Relaunch until Ctrl+1 shows her as the murderer, then examine the body first
+and ask her the same question.
+
+- [ ] She still answers confidently and specifically — no hedging
+- [ ] Her stated time is **outside** the body's 90-minute window. That's the
+      tell, and you can spot it from your own notes
+- [ ] Check Ctrl+1: at the time she names, she really was with someone. The lie
+      is buying her an alibi, not just muddying the water
+
+Then press her:
+
+```
+The body says he died between <WINDOW>. Your time doesn't fit that.
+```
+
+- [ ] She gets rattled, but doesn't immediately confess or change her figure
+
+---
+
 ## Test 5 — End to end
 
 - [ ] Accuse the right person at the front door → you win
@@ -241,13 +291,10 @@ Go to the weapon's home room.
 
 ## Not implemented yet — don't report these
 
-These are Phase 4/5 and are *expected* to be missing:
+These are Phase 5 and are *expected* to be missing:
 
-- Evidence you examine does **not** appear in the Tab notes yet. It's being
-  recorded internally, but nothing renders it
-- **Evelyn does not narrow the time of death.** Asking her about the body gets
-  you an ordinary in-character answer, not a half-hour window
-- No seed display, no seed entry
+- No seed display, no seed entry — you can't replay or report a specific case
+- The dialogue log doesn't record the truth table alongside the transcript
 - Suspects don't know about the physical evidence — examining the dropped item
   doesn't let you confront its owner with it in any mechanical sense (you can
   still ask, they just have no special knowledge of it)

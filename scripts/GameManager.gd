@@ -34,6 +34,12 @@ const RECAP_MAX_CHARS := 160
 
 const VICTIM_NAME := "Lord Reginald Archibald"
 
+## The forensic pathologist. She is the only character who can narrow the
+## body's time of death from a 90-minute window to a single half-hour slot -
+## and the only one who can lie about it convincingly. See
+## CaseGenerator.expert_claim_slot().
+const EXPERT_ID := "blackwood"
+
 ## Used only if CaseGenerator somehow fails to produce a case - the game falls
 ## back to the original fixed scenario rather than crashing. Everything real
 ## now comes from case_data; see CaseGenerator.gd.
@@ -534,6 +540,28 @@ func _build_system_prompt(id: String) -> String:
 		text += "reason to lie about your own whereabouts or about the murder itself. You may be privately guarding your "
 		text += "own personal secret described above, and can be a little evasive ONLY about that specific secret if pressed, "
 		text += "but you are otherwise honest.\n\n"
+
+	# The one character whose occupation gives her information nobody else in
+	# the house can produce. The body only yields a 90-minute window to an
+	# ordinary observer; she collapses it to a single half hour, which usually
+	# clears two or three people outright. It also makes her dangerous when
+	# she's guilty, since she is the only person who can lie with authority.
+	if id == EXPERT_ID and not case_data.is_empty():
+		var claim := CaseGenerator.expert_claim_slot(case_data, id)
+		if claim >= 0:
+			text += "YOUR EXPERT FINDING: you examined the body this morning - it is your profession, and "
+			text += "nobody else here is qualified to. You are confident he died at about %s, " % CaseGenerator.SLOT_TIMES[claim]
+			text += "and you can say so with far more precision than anyone looking at him casually could. "
+			if id == murderer_id:
+				text += "This is a lie. You know perfectly well when he died, because you were there. You are "
+				text += "using the one thing in this house nobody can argue with to move the time away from "
+				text += "yourself. State it calmly, as a professional judgement. Do not hedge, do not offer a "
+				text += "range, and do not let anyone talk you off it - but if the detective points out that "
+				text += "the body itself suggests otherwise, you will be badly rattled.\n\n"
+			else:
+				text += "Say so plainly if you are asked about the body, the time of death, or the injuries. "
+				text += "You are not showing off - you are stating what you know. If someone's account of "
+				text += "where they were conflicts with that time, you can point it out.\n\n"
 
 	# Deliberately the LAST thing in the system prompt. A 3B model weights the
 	# end of its context far more heavily than the middle, and this is the one

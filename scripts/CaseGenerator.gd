@@ -669,6 +669,51 @@ static func last_saw_victim(c: Dictionary, id: String) -> int:
 	return latest
 
 
+## The half-hour slot the house's forensic expert will state as the time of
+## death, having examined the body herself.
+##
+## Innocent, she simply reports the truth, which collapses the body's 90-minute
+## window to a single slot and eliminates whoever was accounted for then.
+##
+## Guilty, she has the one qualification in the house that lets her be believed
+## about this, and every reason to use it. Her false time is chosen to be
+## - outside the window the body itself suggests, so a detective who examined
+##   the body can catch the discrepancy without needing anyone's help, and
+## - a slot where she was genuinely with somebody, so her expert opinion hands
+##   her a corroborated alibi.
+##
+## Returns the slot index, or -1 if there is no expert in play.
+static func expert_claim_slot(c: Dictionary, expert_id: String) -> int:
+	if c.is_empty() or not Dictionary(c["true_paths"]).has(expert_id):
+		return -1
+	var ms := int(c["murder_slot"])
+	if expert_id != String(c["murderer_id"]):
+		return ms
+
+	var window := death_window(c)
+	var outside := []
+	var outside_and_alibied := []
+	for s in range(DINNER_SLOTS, SLOT_COUNT):
+		if s >= int(window[0]) and s <= int(window[1]):
+			continue
+		outside.append(s)
+		for pid in c["true_paths"].keys():
+			if String(pid) == expert_id:
+				continue
+			if String(c["true_paths"][pid][s]) == String(c["true_paths"][expert_id][s]):
+				if not outside_and_alibied.has(s):
+					outside_and_alibied.append(s)
+	if not outside_and_alibied.is_empty():
+		return int(outside_and_alibied[0])
+	if not outside.is_empty():
+		return int(outside[0])
+	# Nowhere outside the window works; any slot but the real one still lies.
+	for s in range(DINNER_SLOTS, SLOT_COUNT):
+		if s != ms:
+			return s
+	return ms
+
+
 ## The coarse time-of-death window shown when the body is examined: 3 slots
 ## (90 minutes) containing the truth but not pinning it. Evelyn Blackwood's
 ## job is to narrow this to the single true slot.

@@ -183,6 +183,23 @@ contradict them standing in the same room.
 its own murder - different room, weapon, method, time, and a real per-suspect
 schedule for the evening - rather than reusing one fixed scenario.
 
+**Phase 4 is in.** Two things:
+
+**A "The Scene" tab** at the top of your case notes (Tab), holding everything
+you've examined, word for word. Unlike the suspect tabs it isn't AI-summarized
+— it's what you saw yourself, so you can trust it against anything you're told.
+
+**Dr Blackwood can narrow the time of death.** The body gives you a 90-minute
+window; she gives you a single half hour, which usually clears two or three
+people outright. She's the only character whose occupation lets her do this —
+so ask her about the body, whether or not you've seen it.
+
+Which also makes her the most dangerous person in the house when she's guilty.
+She'll lie about it with a straight professional face, and the lie is picked to
+put her somewhere she has a witness. The catch: her stated time won't fit the
+window the body itself suggests. Examine the body first and you can catch her
+without needing anyone's help.
+
 **Phase 3 is in.** The crime scene is now a real place you can walk into. The
 body lies in whichever room the generator chose, with the weapon beside it, and
 you can examine all of it:

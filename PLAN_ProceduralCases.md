@@ -209,7 +209,26 @@ have spawned suspects inside the body most games.
 descriptions agree with the Ctrl+1 truth table. Then go to the weapon's home room
 and find the gap it left.
 
-### Phase 4 — Evidence notes and Evelyn
+### Phase 4 — Evidence notes and Evelyn ✅ DONE
+
+A **"The Scene"** tab sits above the suspects in the notes panel, holding
+everything examined, verbatim and in the order found. Deliberately *not*
+AI-summarized like the suspect tabs — it's what the detective saw with their
+own eyes, so it can be trusted against anything a suspect says. Dimmed until
+something has been examined.
+
+**Evelyn Blackwood** examined the body herself and will state a single
+half-hour slot when asked, collapsing the 90-minute window the body gives an
+ordinary observer and usually clearing two or three people outright.
+
+When she's the murderer she lies, and `CaseGenerator.expert_claim_slot()`
+chooses that lie carefully: a slot **outside the window the body itself
+suggests**, so a detective who examined the body can catch the discrepancy
+unaided, and one where she was **genuinely with somebody**, so her professional
+opinion hands her a corroborated alibi. She states it flatly and won't be
+talked off it — but gets rattled if confronted with the body's own evidence.
+
+### Phase 4 (original scope) — Evidence notes and Evelyn
 
 Evidence section in the Tab notes panel. Evelyn Blackwood narrows the body's
 90-minute time-of-death window to a single 30-minute slot — she's the only

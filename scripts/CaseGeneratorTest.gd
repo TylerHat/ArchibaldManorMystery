@@ -67,6 +67,11 @@ func _run_bulk() -> Dictionary:
 	var murder_rooms := {}
 	var murder_slots := {}
 	var weapons := {}
+	# Who actually ends up guilty, against how often they were in the house at
+	# all. The ratio is what matters - a suspect picked into more games will
+	# naturally be the murderer in more games.
+	var murderers := {}
+	var appearances := {}
 	var elapsed := Time.get_ticks_msec()
 
 	for i in range(CASES):
@@ -86,6 +91,9 @@ func _run_bulk() -> Dictionary:
 
 		valid += 1
 		attempts += int(c["attempts"])
+		murderers[c["murderer_id"]] = int(murderers.get(c["murderer_id"], 0)) + 1
+		for pid in active:
+			appearances[pid] = int(appearances.get(pid, 0)) + 1
 		murder_rooms[c["murder_room"]] = int(murder_rooms.get(c["murder_room"], 0)) + 1
 		murder_slots[c["murder_slot"]] = int(murder_slots.get(c["murder_slot"], 0)) + 1
 		var wname := String(Dictionary(c["weapon"])["name"])
@@ -139,6 +147,7 @@ func _run_bulk() -> Dictionary:
 		"block_count": block_count, "block_max": block_max, "unalibied": unalibied,
 		"victim_rooms": victim_rooms, "share_max": share_max,
 		"murder_rooms": murder_rooms, "murder_slots": murder_slots, "weapons": weapons,
+		"murderers": murderers, "appearances": appearances,
 	}
 
 
@@ -153,6 +162,28 @@ func _print_stats(s: Dictionary) -> void:
 	print("victim's rooms before he died:      %.2f avg" % (float(s["victim_rooms"]) / valid))
 	print("innocents with no alibi at the murder slot: %.2f avg   (these are your red herrings)" % (float(s["unalibied"]) / valid))
 	print("most suspects ever in one room:     %d   (cap is %d)" % [int(s["share_max"]), CaseGenerator.MAX_PER_ROOM])
+
+	# If one suspect is guilty far more often than the others relative to how
+	# often they're in the house, the murderer draw is biased. Expect every
+	# "guilty when present" figure to sit near 1/(cast size) - with mixed cast
+	# sizes that averages out around 25-30%.
+	print("\nwho ends up guilty (guilty / times in the house):")
+	var flagged := false
+	var ids: Array = s["appearances"].keys()
+	ids.sort()
+	for id in ids:
+		var seen := int(s["appearances"][id])
+		var guilty := int(s["murderers"].get(id, 0))
+		var pct := 100.0 * guilty / maxi(1, seen)
+		var note := ""
+		if pct > 45.0 or pct < 12.0:
+			note = "   <-- SKEWED"
+			flagged = true
+		print("   %-14s %5d / %5d  = %5.1f%%%s" % [String(id), guilty, seen, pct, note])
+	if flagged:
+		print("   !! murderer selection looks biased - report this")
+	else:
+		print("   all within normal range - murderer draw is uniform")
 
 	print("\nmurder room spread:")
 	var rooms: Array = s["murder_rooms"].keys()
