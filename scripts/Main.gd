@@ -1197,8 +1197,8 @@ func _build_examine_panel() -> void:
 func _build_dialogue_panel() -> void:
 	dialogue_panel = Panel.new()
 	dialogue_panel.set_anchors_preset(Control.PRESET_CENTER)
-	dialogue_panel.size = Vector2(560, 420)
-	dialogue_panel.position = Vector2(-280, -210)
+	dialogue_panel.size = Vector2(560, 620)
+	dialogue_panel.position = Vector2(-280, -310)
 	dialogue_panel.visible = false
 	ui_layer.add_child(dialogue_panel)
 
@@ -1219,6 +1219,10 @@ func _build_dialogue_panel() -> void:
 	dialogue_log.custom_minimum_size = Vector2(0, 260)
 	dialogue_log.bbcode_enabled = true
 	dialogue_log.scroll_following = true
+	# The log is the only part of the panel worth growing - the name, status and
+	# buttons all want their natural height - so it takes every spare pixel.
+	# Without this the extra panel height would be left as dead space.
+	dialogue_log.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	vbox.add_child(dialogue_log)
 
 	dialogue_status_label = Label.new()
@@ -1252,8 +1256,8 @@ func _build_dialogue_panel() -> void:
 func _build_group_panel() -> void:
 	group_panel = Panel.new()
 	group_panel.set_anchors_preset(Control.PRESET_CENTER)
-	group_panel.size = Vector2(720, 480)
-	group_panel.position = Vector2(-360, -240)
+	group_panel.size = Vector2(720, 700)
+	group_panel.position = Vector2(-360, -350)
 	group_panel.visible = false
 	ui_layer.add_child(group_panel)
 
@@ -1281,6 +1285,9 @@ func _build_group_panel() -> void:
 	group_log.custom_minimum_size = Vector2(0, 290)
 	group_log.bbcode_enabled = true
 	group_log.scroll_following = true
+	# Same reasoning as the one-on-one panel: the roster, status and input row
+	# want their natural height, so the spare pixels all go to the transcript.
+	group_log.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	vbox.add_child(group_log)
 
 	group_status_label = Label.new()
@@ -1498,6 +1505,10 @@ func _build_notes_panel() -> void:
 	notes_log.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	notes_log.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	notes_log.add_theme_font_size_override("normal_font_size", 18)
+	# Breathing room for the TIMELINE table, which would otherwise butt the
+	# time straight up against the claim.
+	notes_log.add_theme_constant_override("table_h_separation", 14)
+	notes_log.add_theme_constant_override("table_v_separation", 6)
 	hbox.add_child(notes_log)
 
 	var close_btn := Button.new()
@@ -2358,7 +2369,9 @@ func _render_notes_content(id: String) -> void:
 				notes_log.append_text("Q: %s\nA: %s\n\n" % [_colorize_names(String(e["question"])), answer])
 		return
 
-	notes_log.append_text("[b][color=#8fd3ff]TIMELINE[/color][/b]\n%s\n\n" % _colorize_names(_section_or_placeholder(summary.get("timeline", ""))))
+	notes_log.append_text("[b][color=#8fd3ff]TIMELINE[/color][/b]\n")
+	_append_timeline_table(String(summary.get("timeline", "")))
+	notes_log.append_text("\n")
 	notes_log.append_text("[b][color=#ffb37a]POTENTIAL REASON TO KILL[/color][/b]\n%s\n\n" % _colorize_names(_section_or_placeholder(summary.get("motive", ""))))
 	notes_log.append_text("[b][color=#ff8f8f]SLIPUPS[/color][/b]\n%s\n\n" % _colorize_names(_section_or_placeholder(summary.get("slipups", ""))))
 	notes_log.append_text("[b][color=#ffd166]CONTRADICTIONS[/color][/b]\n%s\n\n" % _colorize_names(_section_or_placeholder(summary.get("contradictions", ""))))
@@ -2369,6 +2382,76 @@ func _section_or_placeholder(text: String) -> String:
 	if t == "":
 		return "Nothing notable yet."
 	return t
+
+
+## Label used in the time column when a suspect gave no clock time at all.
+## Worth showing rather than hiding - a vague "sometime later" is itself a
+## thing the detective should notice.
+const TIMELINE_UNKNOWN := "Unclear"
+
+
+## The model returns TIMELINE bullets as "- TIME | what they claim". Laying
+## them out as a two-column table puts every time in its own aligned column,
+## so an evening can be scanned at a glance instead of read as four sentences.
+## If the model ignored the format (or the section is the placeholder), this
+## falls back to the old plain-text rendering rather than showing a broken table.
+func _append_timeline_table(raw: String) -> void:
+	var rows := _parse_timeline_rows(raw)
+	if rows.is_empty():
+		notes_log.append_text("%s\n" % _colorize_names(_section_or_placeholder(raw)))
+		return
+
+	notes_log.append_text("[table=2]")
+	for r in rows:
+		var t := String(r["time"])
+		var time_cell := ""
+		if t == TIMELINE_UNKNOWN:
+			time_cell = "[color=#777777][i]%s[/i][/color]" % t
+		else:
+			time_cell = "[color=#8fd3ff]%s[/color]" % t
+		notes_log.append_text("[cell ratio=1]%s[/cell]" % time_cell)
+		notes_log.append_text("[cell ratio=3]%s[/cell]" % _colorize_names(String(r["event"])))
+	notes_log.append_text("[/table]\n")
+
+
+## Turns the raw TIMELINE block into [{time, event}, ...]. Returns an empty
+## Array if not a single line used the pipe format, which is the caller's
+## signal to fall back to plain text.
+func _parse_timeline_rows(raw: String) -> Array:
+	var timed: Array = []
+	var untimed: Array = []
+	var saw_pipe := false
+
+	for line in String(raw).split("\n"):
+		var t := String(line).strip_edges()
+		# Strip whatever bullet marker the model decided to use this time.
+		while t.begins_with("-") or t.begins_with("*") or t.begins_with("•"):
+			t = t.substr(1).strip_edges()
+		if t == "":
+			continue
+
+		var time_part := TIMELINE_UNKNOWN
+		var event_part := t
+		var pipe := t.find("|")
+		if pipe != -1:
+			var left := t.substr(0, pipe).strip_edges()
+			var right := t.substr(pipe + 1).strip_edges()
+			if right != "":
+				saw_pipe = true
+				event_part = right
+				if left != "":
+					time_part = left
+
+		var lowered := time_part.to_lower()
+		if lowered.begins_with("unclear") or lowered.begins_with("unknown") or lowered.begins_with("unspecified"):
+			untimed.append({"time": TIMELINE_UNKNOWN, "event": event_part})
+		else:
+			timed.append({"time": time_part, "event": event_part})
+
+	if not saw_pipe:
+		return []
+	# Timed rows keep the model's chronological order; vague ones sink to the bottom.
+	return timed + untimed
 
 
 # --------------------------------------------------------------- debug UI --
