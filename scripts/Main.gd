@@ -115,6 +115,14 @@ var accusation_selected_id: String = ""
 var accusation_accuse_button: Button
 var accusation_result_label: Label
 
+# The mansion map (M). Drawn as a 3x3 grid of cells mirroring GRID rather than
+# rendered from the 3D world, because GRID *is* the floor plan - a second
+# viewport would cost far more and tell you nothing extra.
+var map_panel: Panel
+var map_room_cells: Dictionary = {} # room name -> PanelContainer, for the "you are here" highlight
+var map_room_occupants: Dictionary = {} # room name -> RichTextLabel listing who's in it
+var map_refresh_timer: Timer
+
 var notes_panel: Panel
 var notes_log: RichTextLabel
 var notes_tab_buttons: Dictionary = {} # character_id -> Button
@@ -441,12 +449,18 @@ func _unhandled_input(event: InputEvent) -> void:
 		elif examine_panel and examine_panel.visible:
 			close_examine()
 			get_viewport().set_input_as_handled()
+		elif map_panel and map_panel.visible:
+			toggle_map()
+			get_viewport().set_input_as_handled()
 		elif notes_panel and notes_panel.visible:
 			toggle_notes()
 			get_viewport().set_input_as_handled()
 	elif event.is_action_pressed("toggle_notes"):
-		if not (dialogue_panel.visible or group_panel.visible or accusation_panel.visible or examine_panel.visible):
+		if not (dialogue_panel.visible or group_panel.visible or accusation_panel.visible or examine_panel.visible or map_panel.visible):
 			toggle_notes()
+	elif event.is_action_pressed("toggle_map"):
+		if not (dialogue_panel.visible or group_panel.visible or accusation_panel.visible or examine_panel.visible or notes_panel.visible):
+			toggle_map()
 	# exact_match, or a bare "1" fires these too: is_action_pressed() ignores
 	# modifiers by default, so Ctrl+1 and plain 1 would both match.
 	elif event.is_action_pressed("toggle_debug", false, true):
@@ -1127,7 +1141,7 @@ func _build_ui() -> void:
 	ui_layer.add_child(prompt_label)
 
 	var help := Label.new()
-	help.text = "WASD move | Space jump | Mouse look | Click or E to interact | Tab case notes | Ctrl+1 debug | Ctrl+2 prompt dump | Esc release mouse"
+	help.text = "WASD move | Space jump | Mouse look | Click or E to interact | Tab case notes | M map | Ctrl+1 debug | Ctrl+2 prompt dump | Esc release mouse"
 	help.set_anchors_preset(Control.PRESET_TOP_LEFT)
 	help.position = Vector2(16, 16)
 	help.add_theme_font_size_override("font_size", 14)
@@ -1155,6 +1169,7 @@ func _build_ui() -> void:
 	_build_accusation_panel()
 	_build_notes_panel()
 	_build_examine_panel()
+	_build_map_panel()
 	_build_win_panel()
 
 
@@ -1192,6 +1207,220 @@ func _build_examine_panel() -> void:
 	close_button.text = "Done"
 	close_button.pressed.connect(close_examine)
 	vbox.add_child(close_button)
+
+
+# -------------------------------------------------------------- the map --
+# The mansion is a fixed 3x3 GRID of identically sized rooms, so the floor plan
+# is already fully described by that constant. The map is therefore drawn as a
+# 3x3 GridContainer straight from GRID rather than rendered from the 3D world
+# with a second camera: it costs almost nothing, it can never drift out of sync
+# with the real layout, and a top-down render wouldn't show anything a labelled
+# cell doesn't.
+
+const MAP_CELL_SIZE := Vector2(236, 190)
+
+
+func _build_map_panel() -> void:
+	map_panel = Panel.new()
+	map_panel.set_anchors_preset(Control.PRESET_CENTER)
+	# Sized so the nine cells fit at their minimum (3 x 190 plus separations and
+	# margins) with room left for the title, hint and close button, and still
+	# sits comfortably inside the 1080-tall viewport.
+	map_panel.size = Vector2(800, 800)
+	map_panel.position = Vector2(-400, -400)
+	map_panel.visible = false
+	ui_layer.add_child(map_panel)
+
+	var vbox := VBoxContainer.new()
+	vbox.set_anchors_preset(Control.PRESET_FULL_RECT)
+	vbox.offset_left = 16
+	vbox.offset_top = 16
+	vbox.offset_right = -16
+	vbox.offset_bottom = -16
+	vbox.add_theme_constant_override("separation", 10)
+	map_panel.add_child(vbox)
+
+	var title := Label.new()
+	title.text = "Archibald Manor"
+	title.add_theme_font_size_override("font_size", 22)
+	vbox.add_child(title)
+
+	var hint := Label.new()
+	hint.text = "The front door is at the bottom, off the Hall. Positions update while the map is open."
+	hint.add_theme_font_size_override("font_size", 13)
+	hint.add_theme_color_override("font_color", Color(1, 1, 1, 0.55))
+	vbox.add_child(hint)
+
+	var grid := GridContainer.new()
+	grid.columns = 3
+	grid.add_theme_constant_override("h_separation", 8)
+	grid.add_theme_constant_override("v_separation", 8)
+	grid.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	vbox.add_child(grid)
+
+	# GRID row 0 is the north side of the mansion and row 2 holds the Hall and
+	# the front door, so walking the rows in order already yields the map the
+	# right way up - entrance at the bottom, the way a floor plan is normally
+	# drawn - with no flipping needed.
+	for row in GRID:
+		for rname in row:
+			grid.add_child(_build_map_cell(String(rname)))
+
+	var close_btn := Button.new()
+	close_btn.text = "Close (M)"
+	close_btn.pressed.connect(toggle_map)
+	vbox.add_child(close_btn)
+
+	# Suspects keep walking between rooms while you're reading the map, so it
+	# has to keep up. Polling twice a second is far cheaper than reacting to
+	# every movement step, and is well inside the time it takes anyone to cross
+	# a room, so nothing visibly lags.
+	map_refresh_timer = Timer.new()
+	map_refresh_timer.wait_time = 0.5
+	map_refresh_timer.autostart = true
+	map_refresh_timer.timeout.connect(_on_map_refresh_timer)
+	add_child(map_refresh_timer)
+
+
+func _build_map_cell(rname: String) -> Control:
+	var is_murder_room := rname == _murder_room_name()
+
+	var cell := PanelContainer.new()
+	cell.custom_minimum_size = MAP_CELL_SIZE
+	cell.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	cell.size_flags_vertical = Control.SIZE_EXPAND_FILL
+
+	# Darkened room colors so each cell is recognisably the same room you see
+	# underfoot in 3D, while staying dark enough for white text to sit on.
+	var sb := StyleBoxFlat.new()
+	sb.bg_color = _map_base_color(rname)
+	sb.set_border_width_all(3 if is_murder_room else 1)
+	sb.border_color = Color(0.9, 0.25, 0.25) if is_murder_room else Color(1, 1, 1, 0.25)
+	sb.set_corner_radius_all(6)
+	sb.content_margin_left = 12
+	sb.content_margin_right = 12
+	sb.content_margin_top = 10
+	sb.content_margin_bottom = 10
+	cell.add_theme_stylebox_override("panel", sb)
+
+	var v := VBoxContainer.new()
+	v.add_theme_constant_override("separation", 4)
+	cell.add_child(v)
+
+	var name_label := Label.new()
+	name_label.text = rname
+	name_label.add_theme_font_size_override("font_size", 18)
+	v.add_child(name_label)
+
+	if is_murder_room:
+		var murder_label := Label.new()
+		murder_label.text = "MURDER SCENE"
+		murder_label.add_theme_font_size_override("font_size", 13)
+		murder_label.add_theme_color_override("font_color", Color(1, 0.42, 0.42))
+		v.add_child(murder_label)
+
+	var occupants := RichTextLabel.new()
+	occupants.bbcode_enabled = true
+	occupants.fit_content = true
+	occupants.scroll_active = false
+	occupants.add_theme_font_size_override("normal_font_size", 15)
+	occupants.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	v.add_child(occupants)
+
+	map_room_cells[rname] = cell
+	map_room_occupants[rname] = occupants
+	return cell
+
+
+func _map_base_color(rname: String) -> Color:
+	var c: Color = ROOM_COLORS.get(rname, Color(0.8, 0.75, 0.65))
+	return c.darkened(0.62)
+
+
+## GameManager stores the murder room with its article ("the Billiard Room")
+## because that string is dropped straight into the prose of every suspect
+## briefing. The map needs the bare name to match against GRID.
+func _murder_room_name() -> String:
+	return String(GameManager.murder_room).trim_prefix("the ").strip_edges()
+
+
+func _on_map_refresh_timer() -> void:
+	if map_panel != null and map_panel.visible:
+		_refresh_map()
+
+
+func toggle_map() -> void:
+	if win_panel.visible:
+		return
+	map_panel.visible = not map_panel.visible
+	if map_panel.visible:
+		_refresh_map()
+		player.set_mouse_captured(false)
+	elif not dialogue_panel.visible and not accusation_panel.visible and not notes_panel.visible:
+		player.set_mouse_captured(true)
+
+
+## Repaints who is standing where. Only the occupant text and the "you are
+## here" tint change - the cells themselves are built once, since the floor
+## plan never changes during a game.
+func _refresh_map() -> void:
+	var player_room := ""
+	if is_instance_valid(player):
+		player_room = _room_at(player.global_position)
+
+	# Bucket the suspects by room in a single pass, rather than scanning all
+	# eight NPCs again for each of the nine cells.
+	#
+	# Placed by actual world position, NOT by NPCCharacter.current_room:
+	# begin_travel() sets current_room to the DESTINATION the moment a suspect
+	# sets off, so trusting it would teleport someone across the map the
+	# instant they were told "go to the Library", while they're still visibly
+	# in the Kitchen. _room_at() is the same function that places the
+	# detective, so everyone on the map is located the same honest way.
+	var by_room := {}
+	for id in npc_nodes.keys():
+		var npc = npc_nodes[id]
+		if not is_instance_valid(npc):
+			continue
+		var r := _room_at(npc.global_position)
+		if not by_room.has(r):
+			by_room[r] = []
+		by_room[r].append(String(id))
+
+	for rname in map_room_occupants.keys():
+		var key := String(rname)
+		var lines := []
+		if key == player_room:
+			lines.append("[b]You are here[/b]")
+		for id in by_room.get(key, []):
+			var c := GameManager.get_character(String(id))
+			var col: Color = NPC_COLORS.get(id, Color.WHITE)
+			var entry := "[color=#%s]%s[/color]" % [col.to_html(false), String(c.get("name", id))]
+			# Someone mid-walk is only passing through, which matters if you're
+			# about to head over expecting to find them there.
+			var npc2 = npc_nodes.get(id)
+			if is_instance_valid(npc2) and String(npc2.state) == "moving":
+				entry += " [color=#ffffff66][i]- on the move[/i][/color]"
+			lines.append(entry)
+
+		var label: RichTextLabel = map_room_occupants[key]
+		if lines.is_empty():
+			label.text = "[color=#ffffff55][i]empty[/i][/color]"
+		else:
+			label.text = "\n".join(PackedStringArray(lines))
+
+		# A gentle lift on the room you're standing in. Deliberately a
+		# background change rather than a border one, so it can't be confused
+		# with - or painted over - the murder scene's red border.
+		var cell: PanelContainer = map_room_cells[key]
+		var sb := cell.get_theme_stylebox("panel") as StyleBoxFlat
+		var base := _map_base_color(key)
+		if sb == null:
+			continue
+		if key == player_room:
+			sb.bg_color = base.lightened(0.18)
+		else:
+			sb.bg_color = base
 
 
 func _build_dialogue_panel() -> void:
@@ -2211,7 +2440,7 @@ func toggle_notes() -> void:
 				notes_selected_char = EVIDENCE_TAB
 		_select_notes_character(notes_selected_char)
 		player.set_mouse_captured(false)
-	elif not dialogue_panel.visible and not accusation_panel.visible:
+	elif not dialogue_panel.visible and not accusation_panel.visible and not map_panel.visible:
 		player.set_mouse_captured(true)
 
 

@@ -253,6 +253,7 @@ func _setup_input_map() -> void:
 	_add_key_action("move_right", KEY_D)
 	_add_key_action("interact", KEY_E)
 	_add_key_action("toggle_notes", KEY_TAB)
+	_add_key_action("toggle_map", KEY_M)
 	_add_key_action("jump", KEY_SPACE)
 	# Ctrl-modified so they can't be hit by accident, and so the plain number
 	# keys stay free for anything later.
