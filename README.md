@@ -5,11 +5,16 @@ detective. Lord Reginald Archibald has been murdered in his own manor, and
 one of his guests did it. Question them, catch them in a lie, and make your
 accusation at the front door.
 
-Every time you launch the game (or hit "Play Again"), you first pick which
-2 to 8 of the 8 suspects are actually in the manor that night - either with
-quick "Random N" buttons or by checking specific suspects yourself. The
-murderer is then picked at random from among just that group, so it could
-be Marcus one game and Victoria the next.
+There are 12 suspects on the roster, and at most 8 of them are in the manor
+on any one night. Every time you launch the game (or hit "Play Again"), you
+first pick which 2 to 8 are there - either with quick "Random N" buttons or
+by checking specific suspects yourself. The screen opens on a random legal
+cast of 8, so a fresh launch is already a fresh mystery.
+
+The roster being bigger than the cap is the point: no single playthrough
+sees everyone, and who is *missing* changes the case as much as who is
+present. The murderer is then picked at random from among just the guests
+who came, so it could be Marcus one game and Count Varga the next.
 
 ## Requirements
 
@@ -31,7 +36,7 @@ Open Godot 4.7, choose "Import", and select the `project.godot` file in
 this folder. Press Play (F5). The main scene is `Main.tscn`, which first
 shows a suspect-selection screen, then builds the mansion and UI in code
 (there's nothing else to wire up). The window opens maximized and the 3D
-view/UI stretch to fill whatever size you resize it to (no black bars).
+view/UI stretch to fill whatever size you resize it to (no black ba6.rs).
 
 ## Controls
 
@@ -96,7 +101,7 @@ view/UI stretch to fill whatever size you resize it to (no black bars).
   tell at a glance who's worth pressing further without opening every tab.
 - **Ctrl+1** - toggle a debug overlay in the top-right corner that shows you
   who the murderer is for the current game (plus the weapon/time flavor
-  details), so you can test without interrogating all 8 suspects every
+  details), so you can test without interrogating the whole cast every
   time. The murderer is also printed to the Godot output console at
   startup either way. This is a testing aid - remove the `"toggle_debug"`
   line in `scripts/GameManager.gd`'s `_setup_input_map()` (and the
@@ -279,8 +284,61 @@ completely unaffected by this scene.
 - Your uploaded character sheet had **8 suspects** (Dr. Evelyn Blackwood,
   Marcus Sterling, Victoria Ashford, Samuel "Sam" Carter, Eleanor Whitmore,
   Thomas "Tom" Reeves, Natalie Cross, and Eugene Cross) rather than 7, so
-  all 8 are in the game, each with their own room, and the Hall serves as
+  all 8 went into the game, each with their own room, and the Hall serves as
   the 9th room / entryway with the front door.
+- **Four more were added later**, taking the roster to 12 against a cap of 8
+  in the house per game (`GameManager.MAX_ACTIVE_SUSPECTS`). Three of them
+  deliberately shift the register: the original eight are grounded
+  professionals, and the comedy works because they go on playing it completely
+  straight around a Count and a clown.
+
+  The rule the comic characters are written to is **comedy in the voice, rigour
+  in the facts**. Every one of them still gets a real schedule from the
+  generator and still recites it honestly. The clown's alibi is exactly as
+  checkable as the banker's, which is what keeps this a mystery rather than a
+  sketch. It also turns out that strong, simple, repeatable premises hold up
+  *better* on llama3.2:3b than subtle ones - "speaks in gothic pronouncements"
+  is far easier for a 3B to sustain across a long interview than "sophisticated
+  and cultured, but manipulative beneath the surface".
+
+  - **Emma Moreau**, Ghostwriter hired to write the victim's memoirs. Eleven
+    months in the house with a tape recorder, and she interviewed most of the
+    guests too. The most mechanically useful character on the roster: she can
+    quote what another suspect told her privately, which drops material into the
+    Contradictions section without the player having to stage a Hall
+    confrontation to get it. Nobody else can do that.
+  - **Count Lucian Varga**, Gentleman of Independent Means (since 1608, he
+    says). A man completely committed to the bit, **not** anything actually
+    supernatural, and that distinction is load-bearing. A literal vampire could
+    be in two places at once, and the moment that is true, schedules stop
+    constraining anyone and the case stops being solvable by reasoning. His
+    account of the evening is as checkable as anyone else's. The joke is that a
+    simple question returns four sentences of gothic declamation wrapped around
+    an entirely accurate answer. He takes the murder personally, as a
+    professional insult - less horrified by the death than by the amateurism.
+  - **Desmond "Giggles" Pike**, Children's Entertainer. Booked for a party at
+    this address that does not appear to exist, told to wait in the kitchen, and
+    still waiting nine hours later. Written as the most sensible person in the
+    house rather than a sinister one: the joke is the gap between how he looks
+    and how utterly ordinary he is, which lasts far longer than a creepy-clown
+    bit. That also makes him the most reliable witness on the roster, and the
+    player has to see past the greasepaint to notice.
+  - **Agnes Thorne**, Head Gardener, born on the estate. Twenty-five, born in
+    the gardener's cottage, trained by her mother who held the post before her
+    and died a few months ago. Deliberately **not** a joke: the Count and the
+    clown are funnier when one person is completely unbothered by either. She
+    was arranging the table flowers through dinner and nobody registered her as
+    being in the room, so she is the only character who can report what was said
+    at that table without having been a participant. Note that she keeps the
+    Conservatory, where the generator stores the garden wire and the stone
+    planter - so whenever it picks either weapon she becomes the most
+    incriminated person in the house through no fault of her own, a recurring
+    red herring the case system produces for free.
+
+- Suspects must be **appended** to `GameManager.CHARACTERS`, never inserted.
+  `case_code()` encodes the cast as a bitmask over those indices, so inserting
+  in the middle silently repoints every case code ever generated at a different
+  cast - and it would look like it still worked.
 - Art is intentionally simple low-poly primitives (colored boxes for rooms,
   colored capsules with floating name labels for suspects) rather than
   custom 3D models or downloaded asset packs, per your preference.

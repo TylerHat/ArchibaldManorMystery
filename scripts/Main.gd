@@ -1,5 +1,5 @@
 extends Node3D
-# Builds the entire mansion, the player, all 8 suspects, and all UI purely in
+# Builds the entire mansion, the player, the selected suspects, and all UI purely in
 # code (no hand-authored sub-scenes), so the whole game lives in a handful of
 # readable script files. Also acts as the central "controller" that NPCs and
 # the front door call into (via the "main_controller" group) to open dialogue
@@ -25,7 +25,28 @@ const DOOR_W := 3.0
 # Raise this back to 4 for bigger, messier confrontations - nothing else
 # depends on the value.
 const MEETUP_ROOM := "Hall"
-const MAX_HALL_ATTENDEES := 2
+# Raised from 2 to 4 once a Hall meetup stopped costing O(N^2) in stored tokens.
+#
+# The old limit was not a drama choice, it was a latency ceiling: every line the
+# detective said cost one sequential Ollama request per attendee, and each of
+# those re-read that suspect's whole history because the room rotates between
+# characters and only one KV-cache slot existed. Four attendees measured ~10s of
+# dead air per line.
+#
+# What changed: group lines are no longer copied into every attendee's permanent
+# memory (GroupChat renders the scene on demand instead), the system prompt now
+# shares a cached prefix across all suspects, and OLLAMA_NUM_PARALLEL=4 gives
+# each suspect their own cache slot. See PLAN_DialogueOptimization.md.
+#
+# Note this is a cap on the ROOM, not on drama: three-handed scenes are still
+# the sharpest, because one accuser and one defender is the cleanest shape.
+const MAX_HALL_ATTENDEES := 4
+
+# Body text size for the conversation panels (one-on-one and the Hall). Godot's
+# default control font is 16, so this is that bumped by 50% for readability.
+# The panel dimensions and the log/input minimum sizes were grown to match -
+# retune those alongside this if you change it.
+const DIALOGUE_FONT_SIZE := 40
 
 # 3x3 layout. Hall (front door + player spawn) sits at the front-center so
 # the front door can face the exterior.
@@ -60,6 +81,14 @@ const NPC_COLORS := {
 	"reeves": Color(0.4, 0.6, 0.3),
 	"cross_natalie": Color(0.8, 0.4, 0.1),
 	"cross_eugene": Color(0.6, 0.5, 0.4),
+	# The four added to take the roster to 12. Each was picked to sit well
+	# clear of the gold/orange/tan cluster above, which is already the closest
+	# trio in the set. Twelve is about the practical ceiling here: a thirteenth
+	# suspect means reworking the palette rather than appending to it.
+	"moreau": Color(0.95, 0.6, 0.7),
+	"varga": Color(0.65, 0.55, 0.95),
+	"pike": Color(0.15, 0.85, 0.65),
+	"thorne": Color(0.55, 0.95, 0.4),
 }
 
 var rooms_node: Node3D
@@ -194,10 +223,14 @@ func _start_game(selected_ids: Array) -> void:
 
 
 # --------------------------------------------------------- selection screen --
-# A pre-game screen letting the player choose 2-8 of the 8 suspects, either by
-# checking them individually or via a "Random N" quick-select row. The mansion
-# itself is always the same fixed 3x3 grid of 9 rooms; suspects who aren't
-# chosen simply don't get spawned into their room.
+# A pre-game screen letting the player choose 2 to MAX_ACTIVE_SUSPECTS of the
+# 12-suspect roster, either by checking them individually or via a "Random N"
+# quick-select row. The roster is larger than the cap on purpose, so the cast
+# genuinely differs between games; the screen opens on a random legal cast
+# rather than everyone ticked, which would be over the cap on load.
+#
+# The mansion itself is always the same fixed 3x3 grid of 9 rooms; suspects who
+# aren't chosen simply don't get spawned into their room.
 
 func _build_selection_screen() -> void:
 	selection_layer = CanvasLayer.new()
@@ -231,7 +264,9 @@ func _build_selection_screen() -> void:
 	vbox.add_child(title)
 
 	var subtitle := Label.new()
-	subtitle.text = "Choose which suspects are in the manor tonight (2 to %d)." % GameManager.CHARACTERS.size()
+	subtitle.text = "Choose which %d of the %d suspects are in the manor tonight (2 to %d)." % [
+		GameManager.MAX_ACTIVE_SUSPECTS, GameManager.CHARACTERS.size(), GameManager.MAX_ACTIVE_SUSPECTS,
+	]
 	subtitle.autowrap_mode = TextServer.AUTOWRAP_WORD
 	vbox.add_child(subtitle)
 
@@ -244,7 +279,7 @@ func _build_selection_screen() -> void:
 	var quick_row := HBoxContainer.new()
 	quick_row.add_theme_constant_override("separation", 6)
 	vbox.add_child(quick_row)
-	for n in range(2, GameManager.CHARACTERS.size() + 1):
+	for n in range(2, GameManager.MAX_ACTIVE_SUSPECTS + 1):
 		var qbtn := Button.new()
 		qbtn.text = str(n)
 		qbtn.custom_minimum_size = Vector2(38, 34)
@@ -272,7 +307,6 @@ func _build_selection_screen() -> void:
 		var id: String = c["id"]
 		var cb := CheckBox.new()
 		cb.text = "%s - %s" % [String(c["name"]), String(c["job"])]
-		cb.button_pressed = true
 		cb.add_theme_color_override("font_color", NPC_COLORS.get(id, Color.WHITE))
 		cb.add_theme_color_override("font_hover_color", NPC_COLORS.get(id, Color.WHITE))
 		cb.toggled.connect(func(_pressed): _update_selection_count())
@@ -329,10 +363,13 @@ func _build_selection_screen() -> void:
 	button_row.add_theme_constant_override("separation", 10)
 	vbox.add_child(button_row)
 
-	var all_btn := Button.new()
-	all_btn.text = "Select All"
-	all_btn.pressed.connect(func(): _set_all_checkboxes(true))
-	button_row.add_child(all_btn)
+	# Was "Select All", which is no longer a legal selection now that the roster
+	# is bigger than the cap. Rerolling a full house is what that button was
+	# really being used for anyway.
+	var reroll_btn := Button.new()
+	reroll_btn.text = "Random %d" % GameManager.MAX_ACTIVE_SUSPECTS
+	reroll_btn.pressed.connect(func(): _random_select(GameManager.MAX_ACTIVE_SUSPECTS))
+	button_row.add_child(reroll_btn)
 
 	var none_btn := Button.new()
 	none_btn.text = "Clear"
@@ -344,7 +381,11 @@ func _build_selection_screen() -> void:
 	selection_start_button.pressed.connect(_on_start_pressed)
 	button_row.add_child(selection_start_button)
 
-	_update_selection_count()
+	# Deliberately last: _random_select() ticks boxes and then calls
+	# _update_selection_count(), which needs the count label and Start button
+	# to exist. Opening on a random legal cast beats opening on all 12, which
+	# would be over the cap and would greet the player with Start disabled.
+	_random_select(GameManager.MAX_ACTIVE_SUSPECTS)
 
 
 ## Live feedback as the code is typed, and - the useful part - re-ticking the
@@ -388,13 +429,26 @@ func _set_all_checkboxes(pressed: bool) -> void:
 	_update_selection_count()
 
 
+## Keeps the count label and the Start button in step with the checkboxes.
+## Over-selecting is allowed to happen and then reported, rather than blocked
+## at the click: a checkbox that silently refuses to tick reads as broken,
+## whereas "9 selected - 1 over the limit of 8" tells the player exactly what
+## to do about it.
 func _update_selection_count() -> void:
 	var count := 0
 	for id in selection_checkboxes.keys():
 		if selection_checkboxes[id].button_pressed:
 			count += 1
-	var max_count: int = GameManager.CHARACTERS.size()
-	selection_count_label.text = "%d selected" % count
+	var max_count: int = GameManager.MAX_ACTIVE_SUSPECTS
+	if count > max_count:
+		selection_count_label.text = "%d selected - %d over the limit of %d" % [
+			count, count - max_count, max_count,
+		]
+	elif count < 2:
+		selection_count_label.text = "%d selected - pick at least 2" % count
+	else:
+		selection_count_label.text = "%d of %d selected" % [count, max_count]
+
 	if count < 2 or count > max_count:
 		selection_count_label.add_theme_color_override("font_color", Color(1, 0.45, 0.45))
 		selection_start_button.disabled = true
@@ -409,7 +463,7 @@ func _on_start_pressed() -> void:
 		var id: String = c["id"]
 		if selection_checkboxes[id].button_pressed:
 			selected_ids.append(id)
-	if selected_ids.size() < 2:
+	if selected_ids.size() < 2 or selected_ids.size() > GameManager.MAX_ACTIVE_SUSPECTS:
 		return
 
 	# Read before the selection screen is freed, and set before start_new_game()
@@ -1423,11 +1477,19 @@ func _refresh_map() -> void:
 			sb.bg_color = base
 
 
+## RichTextLabel keeps a separate size for each BBCode style, so bumping only
+## "normal_font_size" would leave [b] and [i] runs - which the transcripts use
+## for speaker names and actions - stuck at the default. Set every variant.
+func _scale_rich_text_font(rt: RichTextLabel) -> void:
+	for key in ["normal_font_size", "bold_font_size", "italics_font_size", "bold_italics_font_size", "mono_font_size"]:
+		rt.add_theme_font_size_override(key, DIALOGUE_FONT_SIZE)
+
+
 func _build_dialogue_panel() -> void:
 	dialogue_panel = Panel.new()
 	dialogue_panel.set_anchors_preset(Control.PRESET_CENTER)
-	dialogue_panel.size = Vector2(560, 620)
-	dialogue_panel.position = Vector2(-280, -310)
+	dialogue_panel.size = Vector2(1368, 800)
+	dialogue_panel.position = Vector2(-684, -400)
 	dialogue_panel.visible = false
 	ui_layer.add_child(dialogue_panel)
 
@@ -1441,12 +1503,13 @@ func _build_dialogue_panel() -> void:
 	dialogue_panel.add_child(vbox)
 
 	dialogue_name_label = Label.new()
-	dialogue_name_label.add_theme_font_size_override("font_size", 22)
+	dialogue_name_label.add_theme_font_size_override("font_size", 33)
 	vbox.add_child(dialogue_name_label)
 
 	dialogue_log = RichTextLabel.new()
-	dialogue_log.custom_minimum_size = Vector2(0, 260)
+	dialogue_log.custom_minimum_size = Vector2(0, 390)
 	dialogue_log.bbcode_enabled = true
+	_scale_rich_text_font(dialogue_log)
 	dialogue_log.scroll_following = true
 	# The log is the only part of the panel worth growing - the name, status and
 	# buttons all want their natural height - so it takes every spare pixel.
@@ -1456,6 +1519,7 @@ func _build_dialogue_panel() -> void:
 
 	dialogue_status_label = Label.new()
 	dialogue_status_label.text = ""
+	dialogue_status_label.add_theme_font_size_override("font_size", DIALOGUE_FONT_SIZE)
 	dialogue_status_label.add_theme_color_override("font_color", Color(1, 0.8, 0.3))
 	vbox.add_child(dialogue_status_label)
 
@@ -1464,17 +1528,20 @@ func _build_dialogue_panel() -> void:
 
 	dialogue_input = LineEdit.new()
 	dialogue_input.placeholder_text = "Type your question..."
-	dialogue_input.custom_minimum_size = Vector2(420, 0)
+	dialogue_input.custom_minimum_size = Vector2(1180, 0)
+	dialogue_input.add_theme_font_size_override("font_size", DIALOGUE_FONT_SIZE)
 	dialogue_input.text_submitted.connect(func(_t): _send_question())
 	hbox.add_child(dialogue_input)
 
 	dialogue_ask_button = Button.new()
 	dialogue_ask_button.text = "Ask"
+	dialogue_ask_button.add_theme_font_size_override("font_size", DIALOGUE_FONT_SIZE)
 	dialogue_ask_button.pressed.connect(_send_question)
 	hbox.add_child(dialogue_ask_button)
 
 	var close_btn := Button.new()
 	close_btn.text = "Close (Esc)"
+	close_btn.add_theme_font_size_override("font_size", DIALOGUE_FONT_SIZE)
 	close_btn.pressed.connect(close_dialogue)
 	vbox.add_child(close_btn)
 
@@ -1485,8 +1552,8 @@ func _build_dialogue_panel() -> void:
 func _build_group_panel() -> void:
 	group_panel = Panel.new()
 	group_panel.set_anchors_preset(Control.PRESET_CENTER)
-	group_panel.size = Vector2(720, 700)
-	group_panel.position = Vector2(-360, -350)
+	group_panel.size = Vector2(1764, 900)
+	group_panel.position = Vector2(-882, -450)
 	group_panel.visible = false
 	ui_layer.add_child(group_panel)
 
@@ -1501,7 +1568,7 @@ func _build_group_panel() -> void:
 
 	var title := Label.new()
 	title.text = "The Hall"
-	title.add_theme_font_size_override("font_size", 22)
+	title.add_theme_font_size_override("font_size", 33)
 	vbox.add_child(title)
 
 	# One name chip per attendee, in that suspect's own body color, so the log
@@ -1511,8 +1578,9 @@ func _build_group_panel() -> void:
 	vbox.add_child(group_roster)
 
 	group_log = RichTextLabel.new()
-	group_log.custom_minimum_size = Vector2(0, 290)
+	group_log.custom_minimum_size = Vector2(0, 435)
 	group_log.bbcode_enabled = true
+	_scale_rich_text_font(group_log)
 	group_log.scroll_following = true
 	# Same reasoning as the one-on-one panel: the roster, status and input row
 	# want their natural height, so the spare pixels all go to the transcript.
@@ -1521,6 +1589,7 @@ func _build_group_panel() -> void:
 
 	group_status_label = Label.new()
 	group_status_label.text = ""
+	group_status_label.add_theme_font_size_override("font_size", DIALOGUE_FONT_SIZE)
 	group_status_label.add_theme_color_override("font_color", Color(1, 0.8, 0.3))
 	vbox.add_child(group_status_label)
 
@@ -1529,17 +1598,20 @@ func _build_group_panel() -> void:
 
 	group_input = LineEdit.new()
 	group_input.placeholder_text = "Say something to the room..."
-	group_input.custom_minimum_size = Vector2(580, 0)
+	group_input.custom_minimum_size = Vector2(1570, 0)
+	group_input.add_theme_font_size_override("font_size", DIALOGUE_FONT_SIZE)
 	group_input.text_submitted.connect(func(_t): _send_group_line())
 	hbox.add_child(group_input)
 
 	group_say_button = Button.new()
 	group_say_button.text = "Say"
+	group_say_button.add_theme_font_size_override("font_size", DIALOGUE_FONT_SIZE)
 	group_say_button.pressed.connect(_send_group_line)
 	hbox.add_child(group_say_button)
 
 	var group_close_btn := Button.new()
 	group_close_btn.text = "Leave the room (Esc)"
+	group_close_btn.add_theme_font_size_override("font_size", DIALOGUE_FONT_SIZE)
 	group_close_btn.pressed.connect(close_group_dialogue)
 	vbox.add_child(group_close_btn)
 
@@ -1967,6 +2039,10 @@ func open_dialogue(character_id: String) -> void:
 
 func close_dialogue() -> void:
 	dialogue_panel.visible = false
+	# Write their case notes up on the way out, so the summary is already
+	# running (and usually finished) by the time the notepad is opened, rather
+	# than starting only when their tab is clicked.
+	_request_summary_if_needed(current_dialogue_character)
 	# Let the suspect get back to wandering / finish any walk they were on.
 	_set_npc_talking(current_dialogue_character, false)
 	current_dialogue_character = ""
@@ -2020,6 +2096,11 @@ func open_group_dialogue() -> void:
 func close_group_dialogue() -> void:
 	GameManager.group_chat.stop()
 	group_panel.visible = false
+	# Everyone still in the room has new material in their file - their own
+	# lines, plus anything said about them in front of them - so refresh all of
+	# them. Anyone sent home earlier was already summarized on their way out.
+	for id in group_frozen_ids:
+		_request_summary_if_needed(String(id))
 	_set_group_frozen(group_frozen_ids, false)
 	if is_instance_valid(player):
 		player.set_mouse_captured(true)
@@ -2065,7 +2146,7 @@ func _rebuild_group_roster(ids: Array) -> void:
 		var chip := Label.new()
 		chip.text = String(c.get("short", ""))
 		chip.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-		chip.add_theme_font_size_override("font_size", 16)
+		chip.add_theme_font_size_override("font_size", 24)
 		var name_col: Color = NPC_COLORS.get(id, Color.WHITE)
 		if silent:
 			name_col = name_col.darkened(0.45)
@@ -2074,8 +2155,8 @@ func _rebuild_group_roster(ids: Array) -> void:
 
 		var btn := Button.new()
 		btn.text = "Let speak" if silent else "Silence"
-		btn.custom_minimum_size = Vector2(104, 0)
-		btn.add_theme_font_size_override("font_size", 12)
+		btn.custom_minimum_size = Vector2(150, 0)
+		btn.add_theme_font_size_override("font_size", 18)
 		btn.pressed.connect(_toggle_attendee_muted.bind(id))
 		col.add_child(btn)
 
@@ -2085,15 +2166,15 @@ func _rebuild_group_roster(ids: Array) -> void:
 		# conversation with either of them.
 		var alone_btn := Button.new()
 		alone_btn.text = "Speak alone"
-		alone_btn.custom_minimum_size = Vector2(104, 0)
-		alone_btn.add_theme_font_size_override("font_size", 12)
+		alone_btn.custom_minimum_size = Vector2(150, 0)
+		alone_btn.add_theme_font_size_override("font_size", 18)
 		alone_btn.pressed.connect(open_dialogue.bind(id))
 		col.add_child(alone_btn)
 
 		var send_btn := Button.new()
 		send_btn.text = "Send home"
-		send_btn.custom_minimum_size = Vector2(104, 0)
-		send_btn.add_theme_font_size_override("font_size", 12)
+		send_btn.custom_minimum_size = Vector2(150, 0)
+		send_btn.add_theme_font_size_override("font_size", 18)
 		send_btn.pressed.connect(_dismiss_attendee.bind(id))
 		col.add_child(send_btn)
 
@@ -2127,6 +2208,9 @@ func _on_group_quorum_lost(remaining: int) -> void:
 ## Releases a suspect from the confrontation's freeze and walks them to
 ## `room_name` - or to their own starting room if none is given.
 func _walk_attendee_out(id: String, room_name: String = "") -> void:
+	# Sending someone home ends your conversation with them, so their notes get
+	# written up now rather than waiting for the rest of the scene to break up.
+	_request_summary_if_needed(id)
 	group_frozen_ids.erase(id)
 	if npc_nodes.has(id) and is_instance_valid(npc_nodes[id]):
 		npc_nodes[id].set_group_scene(false)
@@ -2458,12 +2542,30 @@ func _first_interviewed_character() -> String:
 func _select_notes_character(id: String) -> void:
 	notes_selected_char = id
 	_update_notes_tab_styles()
-	# The evidence pane is read straight out of what you've examined - there's
-	# nothing to summarize and nothing to ask Ollama for.
-	if id != EVIDENCE_TAB and id != "" and not _pending_summaries.has(id) and GameManager.needs_summary_refresh(id):
-		_pending_summaries[id] = true
-		GameManager.request_summary(id)
+	# Conversations now summarize themselves as they end, so by this point the
+	# notes are usually already written. This stays as the backstop for the
+	# cases that skip that path - a summary that failed and is being retried, or
+	# a suspect whose file grew while you were talking to somebody else.
+	_request_summary_if_needed(id)
 	_render_notes_content(id)
+
+
+## Starts a case-notes summary for one suspect, unless there's nothing new to
+## say about them or a request for them is already in flight. Every caller goes
+## through here, so the guards can't drift apart between the "conversation
+## ended" path and the notepad-tab path.
+##
+## The evidence pane is read straight out of what you've examined, so it has
+## nothing to summarize and never reaches the model.
+func _request_summary_if_needed(id: String) -> void:
+	if id == "" or id == EVIDENCE_TAB:
+		return
+	if _pending_summaries.has(id):
+		return
+	if not GameManager.needs_summary_refresh(id):
+		return
+	_pending_summaries[id] = true
+	GameManager.request_summary(id)
 
 
 ## Refreshes every tab's three indicators: a highlighted background if it's
@@ -2684,7 +2786,7 @@ func _parse_timeline_rows(raw: String) -> Array:
 
 
 # --------------------------------------------------------------- debug UI --
-# A dev/testing aid so you don't have to interrogate all 8 suspects just to
+# A dev/testing aid so you don't have to interrogate the whole cast just to
 # confirm the murderer logic is working. This is meant for testing only -
 # remove the Ctrl+1 binding (in GameManager._setup_input_map) before sharing
 # builds with anyone you actually want to keep guessing.

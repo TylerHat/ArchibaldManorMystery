@@ -16,20 +16,36 @@ const CASES := 1000
 const SAMPLES := 3
 
 ## Must match GameManager.CHARACTERS. Duplicated so this scene can run without
-## booting the autoload; _check_layout() verifies the room grid agrees with
-## Main.gd, which is the only cross-file assumption that actually matters.
-const IDS := ["blackwood", "sterling", "ashford", "carter", "whitmore", "reeves", "cross_natalie", "cross_eugene"]
+## booting the autoload; _check_roster() reads GameManager.gd's constant map
+## and fails loudly if the two ever drift apart.
+##
+## That check exists because they already drifted once: the roster grew from 8
+## to 12 and this list did not, so the suite went on reporting 1000/1000 while
+## silently never testing four of the suspects. A duplicated constant with no
+## guard is a test that quietly stops covering things.
+const IDS := [
+	"blackwood", "sterling", "ashford", "carter", "whitmore", "reeves",
+	"cross_natalie", "cross_eugene", "moreau", "varga", "pike", "thorne",
+]
+
+## Mirrors GameManager.MAX_ACTIVE_SUSPECTS. The roster is deliberately larger
+## than this, so casts must be drawn as a subset - generating a case for all 12
+## would test a night the game will never actually run.
+const MAX_ACTIVE := 8
 
 const SHORT := {
 	"blackwood": "Evelyn", "sterling": "Marcus", "ashford": "Victoria",
 	"carter": "Sam", "whitmore": "Eleanor", "reeves": "Tom",
 	"cross_natalie": "Natalie", "cross_eugene": "Eugene",
+	"moreau": "Emma", "varga": "Lucian", "pike": "Desmond",
+	"thorne": "Agnes",
 }
 
 
 func _ready() -> void:
 	print("\n================ CaseGenerator self-test ================\n")
 	_check_layout()
+	_check_roster()
 	var stats := _run_bulk()
 	_print_stats(stats)
 	_print_samples()
@@ -48,6 +64,41 @@ func _check_layout() -> void:
 		print("!! ROOM GRID MISMATCH")
 		print("   Main.gd:         %s" % str(main_grid))
 		print("   CaseGenerator:   %s" % str(CaseGenerator.GRID))
+	print("")
+
+
+## The other cross-file assumption: this scene's duplicated IDS/MAX_ACTIVE must
+## still describe the roster GameManager actually ships. Read out of the script
+## constant map rather than the autoload, the same trick _check_layout() uses,
+## so the suite stays runnable on its own.
+func _check_roster() -> void:
+	var gm: GDScript = load("res://Scripts/GameManager.gd")
+	var consts := gm.get_script_constant_map()
+
+	var real_ids := []
+	for c in consts.get("CHARACTERS", []):
+		real_ids.append(String(Dictionary(c)["id"]))
+
+	if real_ids == IDS:
+		print("roster matches GameManager.gd  OK  (%d suspects)" % IDS.size())
+	else:
+		push_error("CaseGeneratorTest.IDS does not match GameManager.CHARACTERS")
+		print("!! ROSTER MISMATCH - this suite is not testing the real cast")
+		print("   in GameManager only: %s" % str(real_ids.filter(func(i): return not IDS.has(i))))
+		print("   in this test only:   %s" % str(IDS.filter(func(i): return not real_ids.has(i))))
+
+	var real_cap: int = consts.get("MAX_ACTIVE_SUSPECTS", MAX_ACTIVE)
+	if real_cap == MAX_ACTIVE:
+		print("cast cap matches GameManager.gd  OK  (max %d in the house)" % MAX_ACTIVE)
+	else:
+		push_error("CaseGeneratorTest.MAX_ACTIVE (%d) != GameManager.MAX_ACTIVE_SUSPECTS (%d)" % [
+			MAX_ACTIVE, real_cap,
+		])
+		print("!! CAST CAP MISMATCH - test %d, game %d" % [MAX_ACTIVE, real_cap])
+
+	var missing_short := IDS.filter(func(i): return not SHORT.has(i))
+	if not missing_short.is_empty():
+		print("!! no SHORT name for: %s" % str(missing_short))
 	print("")
 
 
@@ -75,7 +126,11 @@ func _run_bulk() -> Dictionary:
 	var elapsed := Time.get_ticks_msec()
 
 	for i in range(CASES):
-		var n := 2 + rng.randi() % (IDS.size() - 1)
+		# 2 to MAX_ACTIVE, drawn from the full roster - never the whole roster,
+		# because the game caps the house at MAX_ACTIVE however many suspects
+		# exist. Casts are subsets now, so this also exercises the far larger
+		# number of distinct casts a 12-strong roster produces.
+		var n := 2 + rng.randi() % (MAX_ACTIVE - 1)
 		var active := IDS.duplicate()
 		active.shuffle()
 		active = active.slice(0, n)
@@ -212,7 +267,7 @@ func _print_samples() -> void:
 	var rng := RandomNumberGenerator.new()
 	rng.randomize()
 	for i in range(SAMPLES):
-		var n := 4 + rng.randi() % 5
+		var n := 4 + rng.randi() % (MAX_ACTIVE - 3)
 		var active := IDS.duplicate()
 		active.shuffle()
 		active = active.slice(0, n)

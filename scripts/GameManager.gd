@@ -1,6 +1,7 @@
 extends Node
 # GameManager (autoload singleton)
-# Holds the 8 suspects, randomizes the murderer each playthrough, talks to a
+# Holds the 12-suspect roster (8 of them in the house per game), randomizes
+# the murderer each playthrough, talks to a
 # local Ollama server running llama3.2:3b to generate in-character responses,
 # and checks the player's final accusation at the front door.
 
@@ -8,29 +9,92 @@ const DialogueLogScript = preload("res://Scripts/DialogueLog.gd")
 
 const OLLAMA_URL := "http://127.0.0.1:11434/api/chat"
 const OLLAMA_MODEL := "huihui_ai/llama3.2-abliterate:3b"
-const MAX_RESPONSE_TOKENS := 300 # hard safety cap - the prompt aims well under this so it's rarely hit mid-sentence
+
+# Generation runs at ~34 tokens/sec on a 4050, i.e. 29ms per token, and that
+# cost is paid whether or not the text is ever shown. So these caps are latency
+# budgets, not safety nets: every token allowed here is a token the player may
+# have to wait for.
+#
+# 140 is deliberately close to what answers actually are. Measured replies ran
+# 13-154 tokens against the old cap of 300, and the prompt asks for 1-3
+# sentences (~60 tokens) - so 300 was only ever reachable by a model that had
+# started rambling, and the reward for letting it finish was 8.8 seconds of
+# waiting for text the player didn't want.
+const MAX_RESPONSE_TOKENS := 140
 const SUMMARY_MAX_TOKENS := 340 # four labeled sections need a bit more room
 # Group-scene lines are capped much harder than one-on-one answers: a Hall
 # meetup costs one sequential request PER attendee for every line the
 # detective says, so per-reply length is the entire latency budget. Short,
-# sharp interruptions are better drama than paragraphs anyway.
-const GROUP_MAX_TOKENS := 90
+# sharp interruptions are better drama than paragraphs anyway. Observed group
+# replies averaged ~35 tokens, so 70 is still roughly double what's used.
+const GROUP_MAX_TOKENS := 70
+
+# Cuts generation off the moment the model stops producing the one thing we
+# asked for. Without these, a model that decides to write the detective's next
+# question too is billed for every token of it before we throw it away - and at
+# 29ms per token that is real time off the clock.
+#
+# "\n\n" is the load-bearing one: every reply here is meant to be a single short
+# spoken line, so a blank line means it has moved on to something else.
+const STOP_SEQUENCES := ["\n\n", "Detective:", "\nDetective", "DETECTIVE:"]
+
+# Keeps the model resident in VRAM between questions. The default is 5 minutes,
+# which is shorter than a player can plausibly spend reading their case notes -
+# and the reload measured on this hardware costs 60 SECONDS. Sent per-request so
+# it works regardless of how Ollama was launched, and so the fix travels with
+# the project rather than living in someone's environment variables.
+const OLLAMA_KEEP_ALIVE := "30m"
 
 # How much conversation the model is allowed to keep in view. This MUST be set
 # explicitly: Ollama's default context is small (2048 on older builds, 4096 on
-# newer ones), and when a conversation outgrows it the oldest messages are
-# silently dropped. A suspect's private interview is the oldest thing in their
-# history after the system prompt, so it is the first thing evicted - which is
-# exactly the wrong thing to forget when you've hauled them into the hall to be
-# confronted with what they told you earlier. A group scene fills the window
-# several times faster than a private one, because every attendee's line is
-# written into every other attendee's history.
+# newer ones, and it derives one from VRAM if you say nothing), and when a
+# conversation outgrows it the oldest messages are silently dropped - starting
+# with the system prompt, since the runner only pins four tokens.
+#
+# We no longer rely on that behaviour being survivable. HISTORY_TOKEN_BUDGET
+# below keeps every history comfortably inside this window and decides for
+# itself what gets forgotten; see _compact_history_if_needed().
+#
+# Group scenes used to fill this window several times faster than private ones,
+# because every attendee's line was written into every other attendee's history.
+# They no longer are - GroupChat renders the room on demand instead - so a
+# meetup now costs about what a private interview costs.
 const OLLAMA_NUM_CTX := 8192
 
 # How much of a suspect's private interview gets replayed into their group-scene
 # turn prompt. See private_recap() for why this exists at all.
 const RECAP_MAX_ITEMS := 4
 const RECAP_MAX_CHARS := 160
+
+# ------------------------------------------------------ history compaction --
+#
+# When a conversation outgrows num_ctx, Ollama drops the OLDEST messages to make
+# room. The runner reports n_keep = 4, meaning four tokens are pinned and
+# everything else is fair game - so the first thing evicted is the system
+# prompt, and the last thing in the system prompt is YOUR OWN MOVEMENTS LAST
+# NIGHT, the block every alibi answer is read off.
+#
+# There is no error when this happens. Suspects simply start improvising their
+# whereabouts again, which is the exact failure CaseGenerator exists to prevent
+# and which reads as the model hallucinating rather than as memory loss.
+#
+# So we decide what gets forgotten, and we never let it be the system prompt.
+
+## Total budget for one character's history. The rest of OLLAMA_NUM_CTX is left
+## for the group turn prompt (~700 tokens, which now also carries the rendered
+## scene) and the reply itself.
+const HISTORY_TOKEN_BUDGET := 4500
+
+## Exchanges kept word-for-word after a compaction. Everything older is folded
+## into one summary message.
+const HISTORY_KEEP_RECENT := 8
+
+## Rough characters-per-token for English. Deliberately an estimate: an exact
+## count would mean tokenizing in GDScript, and being 15% out on a 4,500-token
+## budget inside an 8,192-token window is harmless. Erring low (3.6 rather than
+## the ~4.0 usually quoted) makes us compact slightly early, which is the safe
+## direction to be wrong in.
+const CHARS_PER_TOKEN := 3.6
 
 const VICTIM_NAME := "Lord Reginald Archibald"
 
@@ -60,8 +124,28 @@ const FALLBACK_TIMES := [
 	"sometime after the other guests had gone to bed",
 ]
 
-# The 8 suspects (from the uploaded character sheet). The player (the
-# detective) is not one of these - they are the one asking the questions.
+## The most suspects that can be in the manor on any one night, however many
+## CHARACTERS exist. The roster is deliberately larger than this cap: 12 people
+## in the pool and 8 seats at the table means the cast changes between games
+## even when the player just hits "Random 8", so a full playthrough never sees
+## everyone and the pool stays worth returning to.
+##
+## Eight is also about where a night stops being enjoyable. Every extra suspect
+## is another full interview, another Case Notes tab, and another capsule color
+## to keep apart at a glance - and the palette is close to its practical limit
+## at twelve as it is.
+const MAX_ACTIVE_SUSPECTS := 8
+
+# The 12 suspects the player draws from (the original 8 from the uploaded
+# character sheet, plus four added to fill gaps in the roster: no blood
+# relative of the victim, nobody intimate with him, nobody who liked him, and
+# nobody who cracks under pressure). At most MAX_ACTIVE_SUSPECTS of them are in
+# the house on any given night. The player (the detective) is not one of these
+# - they are the one asking the questions.
+#
+# Append new characters to the END of this array. case_code() encodes the cast
+# as a bitmask over these indices, so inserting in the middle silently
+# repoints every case code ever generated at the wrong cast.
 const CHARACTERS := [
 	{
 		"id": "blackwood",
@@ -143,6 +227,74 @@ const CHARACTERS := [
 		"flavor": "Rumored to be the illegitimate son of the manor's previous owner - vengeful, or simply doing his duty?",
 		"room": "Kitchen",
 	},
+	# Reworked from a stage actress into the roster's most mechanically useful
+	# character. Because she has interviewed most of the house on tape, she can
+	# quote what another suspect told her privately - which drops material into
+	# the Contradictions section without the player having to stage a Hall
+	# confrontation to get it. Nobody else on the roster can do that.
+	{
+		"id": "moreau",
+		"name": "Emma Moreau",
+		"short": "Emma",
+		"first_name": "Emma",
+		"job": "Ghostwriter, hired to write the victim's memoirs",
+		"personality": "Cheerfully indiscreet. She treats other people's secrets as material rather than confidences and quotes them back word for word, because that is literally her job. Not malicious, simply without any sense that some things were told to her in confidence.",
+		"flavor": "Reginald's memoirs were three months from a publisher, and at least two people in this house are in them.",
+		"room": "Ballroom",
+	},
+	# The vampire, played as a man completely committed to the bit rather than
+	# as anything supernatural. That distinction is load-bearing: a literal
+	# vampire could be in two places at once, and the moment that is true,
+	# schedules stop constraining anyone and the case stops being solvable by
+	# reasoning. His account of the evening is as checkable as the banker's.
+	# The joke is that a simple question returns four sentences of gothic
+	# declamation wrapped around an entirely accurate answer.
+	{
+		"id": "varga",
+		"name": "Count Lucian Varga",
+		"short": "Lucian",
+		"first_name": "Lucian",
+		"job": "Gentleman of Independent Means (since 1608, he says)",
+		"personality": "Enormously theatrical and unfailingly courteous. Every answer arrives wrapped in several sentences of gothic declamation before the useful part, which is always accurate - he considers lying beneath his dignity. He declines all food with elaborate excuses, is visibly wounded by any mention of garlic, and calls everyone child regardless of their age. He takes the murder personally, as a professional insult: he is less horrified by the death than by the amateurism of it.",
+		"flavor": "He says the Archibalds have owed him a debt since 1608, and he has been remarkably patient about it.",
+		"room": "Library",
+	},
+	# The clown, written as the most sensible person in the house rather than as
+	# a sinister one. The joke is the gap between how he looks and how utterly
+	# ordinary he is, which lasts far longer than a creepy-clown bit would. It
+	# also makes him the most reliable witness on the roster - a level-headed
+	# man with nothing to hide who sat in the kitchen paying attention for nine
+	# hours - and the player has to see past the greasepaint to notice.
+	{
+		"id": "pike",
+		"name": 'Desmond "Giggles" Pike',
+		"short": "Desmond",
+		"first_name": "Desmond",
+		"job": "Children's Entertainer",
+		"personality": "The most sensible, level-headed and frankly boring person in the house, trapped in a clown suit and deeply mortified about it. He answers plainly and precisely, is embarrassed by the greasepaint, and would very much like to be called Desmond rather than Giggles. Nobody does.",
+		"flavor": "Someone in this house booked him for a children's party that does not exist, and never paid him.",
+		"room": "Kitchen",
+	},
+	# The straight woman, and deliberately not a joke. The Count and the clown
+	# are funnier when one person in the house is completely unbothered by
+	# either of them. She is also the only character who can report what was
+	# said at dinner without having been a participant: staff are invisible, so
+	# the table talked freely in front of her.
+	#
+	# Note that she owns the Conservatory, where CaseGenerator keeps the garden
+	# wire and the stone planter. Whenever the generator picks either weapon she
+	# becomes the most incriminated person in the house through no fault of her
+	# own - a recurring red herring the case system produces for free.
+	{
+		"id": "thorne",
+		"name": "Agnes Thorne",
+		"short": "Agnes",
+		"first_name": "Agnes",
+		"job": "Head Gardener, born on the estate",
+		"personality": "Twenty-five years old, quiet, watchful and matter-of-fact, with a bluntness that startles people who mistake her age for deference. She was born in the gardener's cottage here and grew up underfoot at dinners exactly like this one, and stopped being impressed by the guests at about nine years old. She answers plainly and does not soften things. Nothing in this house surprises her, including the body, the Count, or the clown in the kitchen.",
+		"flavor": "She was born on this estate, and her mother's ashes are on the south lawn, which Reginald had just signed papers to sell.",
+		"room": "Conservatory",
+	},
 ]
 
 signal ollama_response(character_id, text)
@@ -209,12 +361,19 @@ var case_data: Dictionary = {}
 ## treat a missing "scene" as a private interview.
 var transcript: Array = []
 
-# Which of the 8 CHARACTERS are actually in the mansion this game, chosen on
-# the pre-game selection screen. Defaults to all 8 if start_new_game() is
-# ever called without an explicit list (e.g. old save/dev code paths).
+# Which of the CHARACTERS are actually in the mansion this game, chosen on
+# the pre-game selection screen. Never more than MAX_ACTIVE_SUSPECTS. Defaults
+# to a random cast of that size if start_new_game() is ever called without an
+# explicit list (e.g. old save/dev code paths).
 var active_character_ids: Array = []
 
 var _histories: Dictionary = {} # character_id -> Array[{role, content}] (in-character roleplay memory)
+
+## The shared opening of every suspect's system prompt, built once per game.
+## Cached rather than rebuilt per character so it is guaranteed byte-identical
+## across the whole cast - which is the entire point of splitting it out. Cleared in
+## start_new_game() because it bakes in the murder room and the cast.
+var _cached_preamble: String = ""
 var _summaries: Dictionary = {} # character_id -> {timeline, motive, slipups} (empty {} = none yet / parse failed)
 var _summarized_at: Dictionary = {} # character_id -> transcript entry count included in that summary
 
@@ -272,18 +431,31 @@ func _add_key_action(action_name: String, keycode: int, ctrl: bool = false) -> v
 
 
 ## Call this once when a fresh game (or a restart) begins. `character_ids` is
-## the list of suspect ids chosen on the pre-game selection screen (2-8 of
-## them); if left empty, all 8 CHARACTERS are used. Picks a new random
-## murderer from among only the active suspects, and resets every active
-## character's conversation memory.
+## the list of suspect ids chosen on the pre-game selection screen (2 to
+## MAX_ACTIVE_SUSPECTS of them); if left empty, a random cast of
+## MAX_ACTIVE_SUSPECTS is drawn. Picks a new random murderer from among only
+## the active suspects, and resets every active character's conversation
+## memory.
+##
+## The cap is enforced here as well as on the selection screen, so no dev or
+## test code path can quietly put more suspects in the house than the game is
+## built to run - an over-full cast would not crash, it would just produce a
+## night nobody wants to sit through.
 func start_new_game(character_ids: Array = []) -> void:
 	randomize()
 	if character_ids.is_empty():
-		active_character_ids = []
+		var pool_ids := []
 		for c in CHARACTERS:
-			active_character_ids.append(c["id"])
+			pool_ids.append(c["id"])
+		pool_ids.shuffle()
+		active_character_ids = pool_ids.slice(0, MAX_ACTIVE_SUSPECTS)
 	else:
 		active_character_ids = character_ids.duplicate()
+	if active_character_ids.size() > MAX_ACTIVE_SUSPECTS:
+		push_warning("start_new_game: %d suspects requested, trimming to the cap of %d" % [
+			active_character_ids.size(), MAX_ACTIVE_SUSPECTS,
+		])
+		active_character_ids = active_character_ids.slice(0, MAX_ACTIVE_SUSPECTS)
 
 	var pool := active_characters()
 
@@ -324,6 +496,9 @@ func start_new_game(character_ids: Array = []) -> void:
 	_histories.clear()
 	_summaries.clear()
 	_summarized_at.clear()
+	# Must be cleared before the prompts below are built: it bakes in this
+	# game's murder room and cast, both of which have just changed.
+	_cached_preamble = ""
 	_request_queue.clear()
 	_busy = false
 	_current_request = {}
@@ -411,7 +586,7 @@ func parse_case_code(code: String) -> Dictionary:
 	for i in range(CHARACTERS.size()):
 		if mask & (1 << i):
 			ids.append(String(CHARACTERS[i]["id"]))
-	if ids.size() < 2:
+	if ids.size() < 2 or ids.size() > MAX_ACTIVE_SUSPECTS:
 		return {}
 	return {"seed": out_seed, "ids": ids}
 
@@ -505,10 +680,34 @@ func _join_plain(names: Array) -> String:
 	return "%s and %s" % [", ".join(PackedStringArray(head)), String(names[names.size() - 1])]
 
 
-func _build_system_prompt(id: String) -> String:
-	var c := get_character(id)
+## The opening ~800 tokens of every suspect's system prompt, byte-for-byte
+## identical for all eight of them. Built once per game and reused.
+##
+## The identical part is not a tidiness exercise - it is the single cheapest
+## performance fix in the project. llama.cpp decides how much of a cached
+## conversation it can reuse by comparing the new prompt against the resident
+## one from the FIRST token and stopping at the first difference. The old
+## opening line was "You are role-playing as <name>...", so two suspects'
+## prompts diverged at roughly token 6 and everything after it - all of the text
+## below, which never differed at all - was re-tokenized and re-processed on
+## every switch between characters.
+##
+## Measured on a 4050: that showed up as 800-1100ms of prompt-eval per turn in a
+## Hall meetup versus ~90ms in a one-on-one, and the server log named the cause
+## outright ("selected slot by LCP similarity, f_sim_best = 0.683" in a meetup
+## against 0.95-0.99 in an interview).
+##
+## So: everything that is the same for everybody goes here, first, and anything
+## carrying a name or a schedule goes in the per-character tail. Adding a
+## character-specific detail to this function silently undoes the fix - if you
+## need one, put it in _build_character_tail() instead.
+func _shared_case_preamble() -> String:
+	if _cached_preamble != "":
+		return _cached_preamble
+
 	var text := ""
-	text += "You are role-playing as %s in an interactive murder-mystery game called Archibald Manor. " % c["name"]
+	text += "You are role-playing one of the guests in an interactive murder-mystery game called Archibald Manor. "
+	text += "Which guest you are is set out below, under WHO YOU ARE. "
 	text += "Stay completely in character at all times. Never mention that you are an AI, a language model, or that this is a game. "
 	text += "IMPORTANT - keep every answer SHORT: 1 to 3 sentences, ideally under 50 words, like a real spoken reply in conversation, "
 	text += "not a monologue or an essay. Never use lists, headers, or bullet points. Always finish your sentence - if you're running "
@@ -542,15 +741,18 @@ func _build_system_prompt(id: String) -> String:
 	# them as witnesses and alibis. Worse, in a group scene one suspect invents
 	# someone and the other corroborates them, because hearing it said out loud
 	# is indistinguishable from it being true.
-	var others := []
-	for c2 in active_characters():
-		if c2["id"] != id:
-			others.append("%s (%s)" % [String(c2["name"]), String(c2["job"])])
+	#
+	# This used to read "- You." followed by the others, which made the list
+	# different for every character and so broke the shared prefix. Naming all of
+	# them uniformly costs a few tokens and is arguably clearer anyway: the
+	# character learns which one they are immediately below, and the completeness
+	# guarantee - the thing this block exists for - is untouched.
 	text += "EVERYONE IN THE HOUSE:\n"
-	text += "- You.\n- The detective questioning you.\n"
-	for o in others:
-		text += "- %s\n" % o
+	text += "- The detective questioning you.\n"
+	for c2 in active_characters():
+		text += "- %s (%s)\n" % [String(c2["name"]), String(c2["job"])]
 	text += "- %s, the victim, now dead.\n" % VICTIM_NAME
+	text += "You are ONE of the guests on that list; the rest of them are other people, not you. "
 	text += "That list is complete. There is nobody else here - no other guests, no staff, no "
 	text += "servants, no family, no visitors, nobody from the village. Never mention or refer to "
 	text += "a person who is not on that list, and never invent a name. If you did not see who did "
@@ -576,12 +778,29 @@ func _build_system_prompt(id: String) -> String:
 	text += "You may include a short physical action of your own by putting it in round brackets, like "
 	text += "(nods) or (sets down the glass). Keep it to a few words, and keep the rest of your reply spoken.\n\n"
 
-	text += "YOUR CHARACTER:\n"
+	# ---- end of the shared prefix. Nothing above this line may vary. ----
+	_cached_preamble = text
+	return _cached_preamble
+
+
+## Everything downstream of the shared prefix: who this particular suspect is,
+## what they are hiding, and what they did last night.
+##
+## Order inside here is load-bearing and unchanged from before - the schedule
+## still goes last, because a 3B model weights the end of its context most
+## heavily and every alibi question in the game is answered out of that block.
+func _build_character_tail(id: String) -> String:
+	var c := get_character(id)
+	var text := ""
+
+	text += "WHO YOU ARE:\n"
 	text += "- Name: %s\n" % c["name"]
 	text += "- Occupation: %s\n" % c["job"]
 	text += "- Personality: %s\n" % c["personality"]
 	text += "- Personal background detail: %s\n" % c["flavor"]
-	text += "- You are currently in the %s.\n\n" % room_for(id)
+	text += "- You are currently in the %s.\n" % room_for(id)
+	text += "You are %s and nobody else. Everyone else named in the list above is a different "  % c["name"]
+	text += "person - another guest in the house - and you must never speak as them or for them.\n\n"
 
 	if id == murderer_id:
 		text += "YOUR SECRET (very important, never reveal this directly): YOU are the murderer. "
@@ -665,6 +884,15 @@ func _build_system_prompt(id: String) -> String:
 	return text
 
 
+## A suspect's full system prompt: the shared case preamble, then their own
+## identity, secret and schedule. Split in two so the first ~800 tokens are
+## byte-identical across all eight suspects and stay in the model's KV cache
+## when the Hall rotates from one speaker to the next - see
+## _shared_case_preamble() for the measurements behind that.
+func _build_system_prompt(id: String) -> String:
+	return _shared_case_preamble() + _build_character_tail(id)
+
+
 # ------------------------------------------------------- stage directions --
 
 ## Splits a detective's line into a physical action and spoken words, using
@@ -743,17 +971,27 @@ func frame_player_line(raw: String) -> String:
 func ask_character(id: String, question: String) -> void:
 	if not _histories.has(id):
 		return
+	# Before appending, so the request that goes out is already within budget -
+	# compacting after the reply would let exactly one over-budget prompt through
+	# to Ollama, and that is the one that gets silently truncated.
+	_compact_history_if_needed(id)
 	_histories[id].append({"role": "user", "content": frame_player_line(question)})
 	var body := {
 		"model": OLLAMA_MODEL,
 		"messages": _histories[id],
 		"stream": false,
+		"keep_alive": OLLAMA_KEEP_ALIVE,
 		# Hard cap on how many tokens Ollama is allowed to generate. Without
 		# this, a chatty model can ramble for hundreds of tokens on a one-line
 		# question, which is the single biggest cause of multi-minute waits -
 		# far bigger than model size or CPU vs GPU. ~120 tokens is roughly a
 		# short paragraph, plenty for an in-character answer.
-		"options": {"num_predict": MAX_RESPONSE_TOKENS, "temperature": 0.8, "num_ctx": OLLAMA_NUM_CTX},
+		"options": {
+			"num_predict": MAX_RESPONSE_TOKENS,
+			"temperature": 0.8,
+			"num_ctx": OLLAMA_NUM_CTX,
+			"stop": STOP_SEQUENCES,
+		},
 	}
 	_enqueue({"kind": "dialogue", "character_id": id, "question": question, "body": body})
 
@@ -807,13 +1045,81 @@ func _condense(text: String) -> String:
 
 
 ## Adds something a character HEARD to their private memory without asking
-## them for a reply. Used by GroupChat so everyone standing in the Hall
-## remembers the whole confrontation - not just the lines they answered - and
-## can bring it up later in a one-on-one interrogation.
+## them for a reply. Used by GroupChat to write the one digest a Hall meetup
+## leaves behind, so a suspect can be pressed later on what they said in public.
 func note_to_character(id: String, text: String) -> void:
 	if not _histories.has(id):
 		return
 	_histories[id].append({"role": "user", "content": text})
+	_compact_history_if_needed(id)
+
+
+# ------------------------------------------------------ history compaction --
+
+## Rough token count for one history. See CHARS_PER_TOKEN for why this is an
+## estimate rather than a real tokenization.
+func _approx_tokens(history: Array) -> int:
+	var chars := 0
+	for m in history:
+		chars += String(m.get("content", "")).length()
+		chars += 8 # per-message role and delimiter overhead
+	return int(ceil(float(chars) / CHARS_PER_TOKEN))
+
+
+## Folds the older half of a character's memory into a single summary message
+## once it outgrows HISTORY_TOKEN_BUDGET, keeping the system prompt untouched
+## and the most recent HISTORY_KEEP_RECENT messages word-for-word.
+##
+## Compaction is deliberately CHUNKY. Rewriting any part of a history
+## invalidates the model's cached prefix for that character and forces a full
+## re-read on their next turn, so this trades one expensive turn every so often
+## against a slightly expensive turn every single time. Trimming one message per
+## request would be the same amount of forgetting for far more wall-clock.
+##
+## What survives is what the detective could hold them to: their own answers.
+## The questions are dropped - a suspect does not need to remember being asked,
+## only what they said.
+func _compact_history_if_needed(id: String) -> void:
+	if not _histories.has(id):
+		return
+	var history: Array = _histories[id]
+	if history.size() <= HISTORY_KEEP_RECENT + 1:
+		return
+	if _approx_tokens(history) <= HISTORY_TOKEN_BUDGET:
+		return
+
+	# Index 0 is the system prompt and is never touched - it holds the case, the
+	# cast, and this character's schedule.
+	var system_msg = history[0]
+	var recent: Array = history.slice(history.size() - HISTORY_KEEP_RECENT)
+	var older: Array = history.slice(1, history.size() - HISTORY_KEEP_RECENT)
+	if older.is_empty():
+		return
+
+	var claims := []
+	for m in older:
+		if String(m.get("role", "")) != "assistant":
+			continue
+		var line := _condense(String(m.get("content", "")))
+		if line != "":
+			claims.append(line)
+
+	var summary := "[EARLIER IN THIS INVESTIGATION - things you have already said, "
+	summary += "and which still stand. Do not reverse or deny them; if you are challenged "
+	summary += "about one of them, hold to it.]\n"
+	if claims.is_empty():
+		summary += "- Nothing you said earlier is worth repeating.\n"
+	else:
+		for line in claims:
+			summary += "- \"%s\"\n" % line
+
+	var rebuilt := [system_msg, {"role": "user", "content": summary}]
+	rebuilt.append_array(recent)
+	_histories[id] = rebuilt
+
+	if OS.is_debug_build():
+		print("[DEBUG] Compacted %s's memory: %d messages -> %d (~%d tokens)." % [
+			id, history.size(), rebuilt.size(), _approx_tokens(rebuilt)])
 
 
 ## Asks one attendee of a Hall meetup for their line. `player_line` is whatever
@@ -834,6 +1140,10 @@ func ask_group_member(id: String, prompt: String, player_line: String = "", witn
 	if not _histories.has(id):
 		group_error.emit(id, "That suspect isn't part of this game.", token)
 		return
+	# A group turn is the longest prompt in the game - the history, plus the
+	# rendered scene, plus the turn instruction - so it is the one most likely to
+	# run into the context window.
+	_compact_history_if_needed(id)
 	var messages: Array = _histories[id].duplicate()
 	messages.append({"role": "user", "content": prompt})
 	if debug_dump_group:
@@ -842,12 +1152,18 @@ func ask_group_member(id: String, prompt: String, player_line: String = "", witn
 		"model": OLLAMA_MODEL,
 		"messages": messages,
 		"stream": false,
+		"keep_alive": OLLAMA_KEEP_ALIVE,
 		# Lower temperature than one-on-one dialogue on purpose. In a private
 		# interview a bit of variety makes a suspect feel alive; in a group
 		# scene the same variety reads as a character who can't keep their
 		# story straight, because every line is immediately checkable against
 		# what they said two turns ago in front of witnesses.
-		"options": {"num_predict": GROUP_MAX_TOKENS, "temperature": 0.6, "num_ctx": OLLAMA_NUM_CTX},
+		"options": {
+			"num_predict": GROUP_MAX_TOKENS,
+			"temperature": 0.6,
+			"num_ctx": OLLAMA_NUM_CTX,
+			"stop": STOP_SEQUENCES,
+		},
 	}
 	_enqueue({
 		"kind": "group",
@@ -1014,13 +1330,18 @@ func request_summary(character_id: String) -> void:
 
 	var convo := _build_summary_transcript(character_id, entries)
 
+	# Same shared-prefix discipline as _shared_case_preamble(): the generic role
+	# and the whole format specification come first and are identical for all
+	# eight suspects, and everything naming this particular one is pushed to the
+	# end. The suspect's name used to be in the second sentence, which meant
+	# every summary request evicted the previous one from the model's cache for
+	# the sake of about twenty tokens.
+	#
+	# It also reads better this way - the legend explaining how to parse the
+	# transcript now sits immediately before the transcript it describes.
 	var sys_prompt := ""
 	sys_prompt += "You are a detective's case-notes assistant in a murder-mystery game called Archibald Manor. "
-	sys_prompt += "Below is the full record so far for a suspect named %s (%s). " % [c["name"], c["job"]]
-	sys_prompt += "Lines marked 'Detective:' are private questions and the lines under them are %s's own answers. " % String(c["short"])
-	sys_prompt += "Lines marked '[In the hall...]' were spoken out loud in front of the other guests named there. "
-	sys_prompt += "Lines marked '[In the hall, overheard]' were said by a DIFFERENT guest while %s was standing there listening - " % String(c["short"])
-	sys_prompt += "those are not %s's own words, but %s heard them.\n\n" % [String(c["short"]), String(c["short"])]
+	sys_prompt += "Below is the full record so far for one suspect. "
 	sys_prompt += "Organize this into exactly four sections. Respond using EXACTLY this "
 	sys_prompt += "format and these four markers, in this order, with nothing before, between, or after them:\n\n"
 	sys_prompt += "##TIMELINE##\n- their claimed whereabouts/alibi/account of events around the time of the murder\n"
@@ -1037,7 +1358,15 @@ func request_summary(character_id: String) -> void:
 	sys_prompt += "Name the other guest and both versions.\n\n"
 	sys_prompt += "Under each marker, write 1-3 short bullet points starting with '- ' (TIMELINE may use up to 6). If a section has nothing "
 	sys_prompt += "relevant yet, write a single bullet '- Nothing notable yet.' under that marker instead of leaving "
-	sys_prompt += "it blank. Be objective and third-person. Completely ignore small talk and pleasantries."
+	sys_prompt += "it blank. Be objective and third-person. Completely ignore small talk and pleasantries.\n\n"
+
+	# ---- everything below here names this particular suspect ----
+	sys_prompt += "THE SUSPECT: %s (%s).\n" % [c["name"], c["job"]]
+	sys_prompt += "How to read the record: lines marked 'Detective:' are private questions and the lines "
+	sys_prompt += "under them are %s's own answers. " % String(c["short"])
+	sys_prompt += "Lines marked '[In the hall...]' were spoken out loud in front of the other guests named there. "
+	sys_prompt += "Lines marked '[In the hall, overheard]' were said by a DIFFERENT guest while %s was standing there listening - " % String(c["short"])
+	sys_prompt += "those are not %s's own words, but %s heard them." % [String(c["short"]), String(c["short"])]
 
 	var body := {
 		"model": OLLAMA_MODEL,
@@ -1046,6 +1375,14 @@ func request_summary(character_id: String) -> void:
 			{"role": "user", "content": convo},
 		],
 		"stream": false,
+		"keep_alive": OLLAMA_KEEP_ALIVE,
+		# Deliberately NO "stop" here, unlike dialogue and group requests. The
+		# summary is a four-section document, and a blank line between sections
+		# is entirely plausible output - so the "\n\n" stop that protects the
+		# other two request kinds would silently truncate a summary after
+		# ##TIMELINE##, losing the three sections the player actually opened the
+		# panel for. Correctness beats the second or two it would save, and
+		# summaries are generated lazily anyway.
 		"options": {"num_predict": SUMMARY_MAX_TOKENS, "temperature": 0.4, "num_ctx": OLLAMA_NUM_CTX},
 	}
 	_enqueue({"kind": "summary", "character_id": character_id, "entry_count": entries.size(), "body": body})
@@ -1227,9 +1564,16 @@ func _on_request_completed(result: int, response_code: int, _headers: PackedStri
 			_emit_failure(item, "That suspect said nothing usable. Try again.")
 			_process_queue()
 			return
-		# Stored without the speaker prefix so their own memory of what they
-		# said matches what the room actually heard.
-		_histories[character_id].append({"role": "assistant", "content": spoken})
+		# Deliberately NOT appended to _histories. A group line is part of a
+		# scene that GroupChat renders into each turn prompt on demand and
+		# distills into one digest when the room empties, so storing it here too
+		# would duplicate it - and worse, it would land as an "assistant" message
+		# with no "user" message before it (the turn prompt that prompted it is
+		# ephemeral), leaving a run of orphaned assistant turns in the history for
+		# the model to puzzle over.
+		#
+		# The transcript below is a different thing and still gets it: that is the
+		# detective's record, and it feeds the case notes and the dialogue log.
 		transcript.append({
 			"character_id": character_id,
 			"question": String(item.get("player_line", "")),
