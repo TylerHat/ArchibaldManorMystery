@@ -136,6 +136,18 @@ const FALLBACK_TIMES := [
 ## at twelve as it is.
 const MAX_ACTIVE_SUSPECTS := 8
 
+## Slot numbers are PERMANENT and are never reused. Each character carries one
+## as a "slot" field, and case_code() builds its cast bitmask from those rather
+## than from array position - see case_code() for why that matters.
+##
+## Retiring a character burns their slot forever. Handing it to someone new
+## would make every old code referencing it decode to a stranger, silently,
+## which is the exact bug slots were introduced to kill.
+##
+##
+## The next character added takes slot 15.
+const NEXT_FREE_SLOT := 15
+
 # The 12 suspects the player draws from (the original 8 from the uploaded
 # character sheet, plus four added to fill gaps in the roster: no blood
 # relative of the victim, nobody intimate with him, nobody who liked him, and
@@ -149,6 +161,7 @@ const MAX_ACTIVE_SUSPECTS := 8
 const CHARACTERS := [
 	{
 		"id": "blackwood",
+		"slot": 0,
 		"name": "Dr. Evelyn Blackwood",
 		"short": "Evelyn",
 		"first_name": "Evelyn",
@@ -159,6 +172,7 @@ const CHARACTERS := [
 	},
 	{
 		"id": "sterling",
+		"slot": 1,
 		"name": "Marcus Sterling",
 		"short": "Marcus",
 		"first_name": "Marcus",
@@ -169,6 +183,7 @@ const CHARACTERS := [
 	},
 	{
 		"id": "ashford",
+		"slot": 2,
 		"name": "Victoria Ashford",
 		"short": "Victoria",
 		"first_name": "Victoria",
@@ -179,6 +194,7 @@ const CHARACTERS := [
 	},
 	{
 		"id": "carter",
+		"slot": 3,
 		"name": 'Samuel "Sam" Carter',
 		"short": "Sam",
 		"first_name": "Samuel",
@@ -189,6 +205,7 @@ const CHARACTERS := [
 	},
 	{
 		"id": "whitmore",
+		"slot": 4,
 		"name": "Eleanor Whitmore",
 		"short": "Eleanor",
 		"first_name": "Eleanor",
@@ -199,6 +216,7 @@ const CHARACTERS := [
 	},
 	{
 		"id": "reeves",
+		"slot": 5,
 		"name": 'Thomas "Tom" Reeves',
 		"short": "Tom",
 		"first_name": "Thomas",
@@ -209,6 +227,7 @@ const CHARACTERS := [
 	},
 	{
 		"id": "cross_natalie",
+		"slot": 6,
 		"name": "Natalie Cross",
 		"short": "Natalie",
 		"first_name": "Natalie",
@@ -219,6 +238,7 @@ const CHARACTERS := [
 	},
 	{
 		"id": "cross_eugene",
+		"slot": 7,
 		"name": "Eugene Cross",
 		"short": "Eugene",
 		"first_name": "Eugene",
@@ -234,6 +254,7 @@ const CHARACTERS := [
 	# confrontation to get it. Nobody else on the roster can do that.
 	{
 		"id": "moreau",
+		"slot": 9,
 		"name": "Emma Moreau",
 		"short": "Emma",
 		"first_name": "Emma",
@@ -251,6 +272,7 @@ const CHARACTERS := [
 	# declamation wrapped around an entirely accurate answer.
 	{
 		"id": "varga",
+		"slot": 12,
 		"name": "Count Lucian Varga",
 		"short": "Lucian",
 		"first_name": "Lucian",
@@ -267,6 +289,7 @@ const CHARACTERS := [
 	# hours - and the player has to see past the greasepaint to notice.
 	{
 		"id": "pike",
+		"slot": 13,
 		"name": 'Desmond "Giggles" Pike',
 		"short": "Desmond",
 		"first_name": "Desmond",
@@ -287,6 +310,7 @@ const CHARACTERS := [
 	# own - a recurring red herring the case system produces for free.
 	{
 		"id": "thorne",
+		"slot": 14,
 		"name": "Agnes Thorne",
 		"short": "Agnes",
 		"first_name": "Agnes",
@@ -390,6 +414,22 @@ var _http: HTTPRequest
 
 
 func _ready() -> void:
+	# Cheap insurance on the one invariant the case-code format depends on. A
+	# duplicated or out-of-range slot would not crash anything - it would just
+	# quietly produce codes that decode to the wrong house.
+	var seen_slots := {}
+	for c in CHARACTERS:
+		var sl := int(c["slot"])
+		if seen_slots.has(sl):
+			push_error("Duplicate character slot %d (%s and %s) - case codes will decode wrongly" % [
+				sl, String(seen_slots[sl]), String(c["id"]),
+			])
+		if sl < 0 or sl >= NEXT_FREE_SLOT:
+			push_error("Character %s has slot %d, outside 0..%d" % [
+				String(c["id"]), sl, NEXT_FREE_SLOT - 1,
+			])
+		seen_slots[sl] = String(c["id"])
+
 	_setup_input_map()
 	_http = HTTPRequest.new()
 	_http.use_threads = true
@@ -546,49 +586,96 @@ func active_characters() -> Array:
 
 # ------------------------------------------------------------- case codes --
 
-## "482913-171" - the seed, then a bitmask of which suspects were in the house.
+## "482913-4243" - the seed, then a bitmask of which suspects were in the house.
 ##
 ## The cast has to be in the code. The generator makes every decision from one
 ## RNG, so the same seed with a different set of suspects produces a completely
 ## different mystery - a seed on its own would look reproducible and quietly
 ## not be. Encoding both means one string restores the exact case.
+##
+## The bitmask is keyed on each character's permanent "slot", NOT on their
+## position in CHARACTERS. That distinction is the whole point. When the mask
+## was positional, editing the roster silently repointed every code ever
+## generated at a different cast: the code still parsed, still produced a
+## plausible-looking house, and was quietly the wrong mystery. Silent is the
+## worst possible failure here, because the entire promise of a case code is
+## that it reproduces exactly.
+##
+## With slots, the array can be reordered, added to, or have characters removed
+## and old codes keep meaning what they meant. A code that references a retired
+## slot is now REJECTED with a reason rather than decoded into a stranger.
 func case_code() -> String:
 	var mask := 0
-	for i in range(CHARACTERS.size()):
-		if active_character_ids.has(String(CHARACTERS[i]["id"])):
-			mask |= 1 << i
+	for c in CHARACTERS:
+		if active_character_ids.has(String(c["id"])):
+			mask |= 1 << int(c["slot"])
 	return "%d-%d" % [case_seed, mask]
 
 
-## Parses a code back into {"seed": int, "ids": Array}. Returns {} if it can't
-## be read, so the caller can just ignore bad input rather than validating it
-## twice. A bare seed with no cast is accepted too - the player keeps whatever
-## suspects they've ticked.
+## Every slot currently in use, as slot -> character id. Retired slots are
+## simply absent, which is what lets parse_case_code() tell "suspect who no
+## longer exists" apart from "suspect who was not in that game".
+func _slot_map() -> Dictionary:
+	var out := {}
+	for c in CHARACTERS:
+		out[int(c["slot"])] = String(c["id"])
+	return out
+
+
+## Parses a code into {"seed": int, "ids": Array}, or {"error": String} with a
+## message fit to show the player. Never returns a half-usable result: callers
+## check for "error" and otherwise trust what they get.
+##
+## A bare seed with no cast is accepted - the player keeps whatever suspects
+## they have ticked - because that is a deliberate "replay this mystery with a
+## different house" move rather than a malformed code.
 func parse_case_code(code: String) -> Dictionary:
 	var text := code.strip_edges()
 	if text == "":
-		return {}
+		return {"error": "empty"}
 	var parts := text.split("-")
-	if parts.size() > 2:
-		return {}
-	if not String(parts[0]).is_valid_int():
-		return {}
+	if parts.size() > 2 or not String(parts[0]).is_valid_int():
+		return {"error": "not a valid code"}
 	var out_seed := int(String(parts[0]))
 	if out_seed <= 0 or out_seed >= MAX_SEED:
-		return {}
+		return {"error": "not a valid code"}
 	if parts.size() == 1:
 		return {"seed": out_seed, "ids": []}
 
 	if not String(parts[1]).is_valid_int():
-		return {}
+		return {"error": "not a valid code"}
 	var mask := int(String(parts[1]))
+	if mask <= 0:
+		return {"error": "not a valid code"}
+
+	# Walk the bits rather than the roster, so a bit pointing at a slot nobody
+	# occupies is caught instead of skipped. Skipping it is exactly the silent
+	# wrong-cast this format was changed to prevent - the code would decode to
+	# a smaller house and look perfectly fine.
+	var slots := _slot_map()
 	var ids := []
-	for i in range(CHARACTERS.size()):
-		if mask & (1 << i):
-			ids.append(String(CHARACTERS[i]["id"]))
-	if ids.size() < 2 or ids.size() > MAX_ACTIVE_SUSPECTS:
-		return {}
-	return {"seed": out_seed, "ids": ids}
+	var bit := 0
+	var remaining := mask
+	while remaining > 0:
+		if remaining & 1:
+			if not slots.has(bit):
+				return {"error": "code is from an older cast"}
+			ids.append(String(slots[bit]))
+		remaining >>= 1
+		bit += 1
+
+	if ids.size() < 2:
+		return {"error": "code names fewer than 2 suspects"}
+	if ids.size() > MAX_ACTIVE_SUSPECTS:
+		return {"error": "code names more than %d suspects" % MAX_ACTIVE_SUSPECTS}
+
+	# CHARACTERS order, not bit order, so the cast list is stable regardless of
+	# how slots happen to be numbered.
+	var ordered := []
+	for c in CHARACTERS:
+		if ids.has(String(c["id"])):
+			ordered.append(String(c["id"]))
+	return {"seed": out_seed, "ids": ordered}
 
 
 ## Records a piece of evidence the first time the detective examines it.

@@ -58,7 +58,7 @@ const MAX_ATTEMPTS := 400
 ## asserts the two agree.
 const GRID := [
 	["Kitchen", "Ballroom", "Conservatory"],
-	["Lounge", "Study", "Dining Room"],
+	["Lounge", "Dining Room", "Study"],
 	["Billiard Room", "Hall", "Library"],
 ]
 

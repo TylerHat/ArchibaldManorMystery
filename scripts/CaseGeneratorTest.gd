@@ -46,6 +46,7 @@ func _ready() -> void:
 	print("\n================ CaseGenerator self-test ================\n")
 	_check_layout()
 	_check_roster()
+	_check_case_codes()
 	var stats := _run_bulk()
 	_print_stats(stats)
 	_print_samples()
@@ -99,6 +100,86 @@ func _check_roster() -> void:
 	var missing_short := IDS.filter(func(i): return not SHORT.has(i))
 	if not missing_short.is_empty():
 		print("!! no SHORT name for: %s" % str(missing_short))
+	print("")
+
+
+## Case codes have to survive roster edits, because the whole promise of a code
+## is that it reproduces a case exactly. They are keyed on permanent per-character
+## slots for that reason. This checks the two ways that can silently break:
+## a duplicated slot (two suspects sharing a bit) and a cast that does not
+## survive a round trip through encode and decode.
+func _check_case_codes() -> void:
+	var gm: GDScript = load("res://Scripts/GameManager.gd")
+	var chars: Array = gm.get_script_constant_map().get("CHARACTERS", [])
+
+	var seen := {}
+	var dupes := []
+	for c in chars:
+		var sl := int(Dictionary(c)["slot"])
+		if seen.has(sl):
+			dupes.append("slot %d: %s and %s" % [sl, String(seen[sl]), String(Dictionary(c)["id"])])
+		seen[sl] = String(Dictionary(c)["id"])
+	if dupes.is_empty():
+		print("character slots unique  OK  (%d slots, highest %d)" % [seen.size(), seen.keys().max()])
+	else:
+		push_error("Duplicate character slots: %s" % str(dupes))
+		print("!! DUPLICATE SLOTS - case codes will decode to the wrong cast")
+		for d in dupes:
+			print("   %s" % d)
+
+	# Round trip every cast size the game allows, on the real GameManager.
+	var rng := RandomNumberGenerator.new()
+	rng.randomize()
+	var bad := 0
+	for trial in range(200):
+		var n := 2 + rng.randi() % (MAX_ACTIVE - 1)
+		var cast := IDS.duplicate()
+		cast.shuffle()
+		cast = cast.slice(0, n)
+
+		GameManager.active_character_ids = cast.duplicate()
+		GameManager.case_seed = 1 + rng.randi() % 999999
+		var code := GameManager.case_code()
+		var back: Dictionary = GameManager.parse_case_code(code)
+
+		var want := IDS.filter(func(i): return cast.has(i))
+		if back.has("error"):
+			bad += 1
+			if bad <= 3:
+				print("   %s did not parse: %s" % [code, String(back["error"])])
+		elif int(back["seed"]) != GameManager.case_seed or Array(back["ids"]) != want:
+			bad += 1
+			if bad <= 3:
+				print("   %s round-tripped to %s, expected %s" % [code, str(back.get("ids")), str(want)])
+	if bad == 0:
+		print("case codes round-trip  OK  (200 casts)")
+	else:
+		push_error("%d/200 case codes failed to round-trip" % bad)
+		print("!! %d/200 CASE CODES FAILED TO ROUND-TRIP" % bad)
+
+	# A code pointing at a retired slot must be refused, not quietly decoded
+	# into whoever happens to sit there now.
+	var live := {}
+	for c in chars:
+		live[int(Dictionary(c)["slot"])] = true
+	var retired := -1
+	for sl in range(int(gm.get_script_constant_map().get("NEXT_FREE_SLOT", 0))):
+		if not live.has(sl):
+			retired = sl
+			break
+	if retired >= 0:
+		var two := 0
+		var mask := 1 << retired
+		for c in chars:
+			if two < 2:
+				mask |= 1 << int(Dictionary(c)["slot"])
+				two += 1
+		var res: Dictionary = GameManager.parse_case_code("123456-%d" % mask)
+		if res.has("error"):
+			print("retired slot %d refused  OK  (\"%s\")" % [retired, String(res["error"])])
+		else:
+			push_error("A code referencing retired slot %d was accepted" % retired)
+			print("!! RETIRED SLOT %d ACCEPTED - decoded to %s" % [retired, str(res.get("ids"))])
 	print("")
 
 

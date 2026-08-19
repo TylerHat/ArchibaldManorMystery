@@ -112,7 +112,7 @@ view/UI stretch to fill whatever size you resize it to (no black ba6.rs).
 ## How it works
 
 - The mansion is a 3x3 grid of 9 rooms (Kitchen, Ballroom, Conservatory,
-  Lounge, Study, Dining Room, Billiard Room, Library, and the Hall), all
+  Lounge, Dining Room, Study, Billiard Room, Hall, and the Library), all
   connected by open doorways. All of it is built procedurally out of simple
   boxes and capsules in `scripts/Main.gd` - no external 3D models required.
   The grid itself never changes size; if you leave a suspect out at the
@@ -302,29 +302,29 @@ completely unaffected by this scene.
   and cultured, but manipulative beneath the surface".
 
   - **Emma Moreau**, Ghostwriter hired to write the victim's memoirs. Eleven
-    months in the house with a tape recorder, and she interviewed most of the
-    guests too. The most mechanically useful character on the roster: she can
-    quote what another suspect told her privately, which drops material into the
-    Contradictions section without the player having to stage a Hall
-    confrontation to get it. Nobody else can do that.
+	months in the house with a tape recorder, and she interviewed most of the
+	guests too. The most mechanically useful character on the roster: she can
+	quote what another suspect told her privately, which drops material into the
+	Contradictions section without the player having to stage a Hall
+	confrontation to get it. Nobody else can do that.
   - **Count Lucian Varga**, Gentleman of Independent Means (since 1608, he
-    says). A man completely committed to the bit, **not** anything actually
-    supernatural, and that distinction is load-bearing. A literal vampire could
-    be in two places at once, and the moment that is true, schedules stop
-    constraining anyone and the case stops being solvable by reasoning. His
-    account of the evening is as checkable as anyone else's. The joke is that a
+	says). A man completely committed to the bit, **not** anything actually
+	supernatural, and that distinction is load-bearing. A literal vampire could
+	be in two places at once, and the moment that is true, schedules stop
+	constraining anyone and the case stops being solvable by reasoning. His
+	account of the evening is as checkable as anyone else's. The joke is that a
     simple question returns four sentences of gothic declamation wrapped around
     an entirely accurate answer. He takes the murder personally, as a
     professional insult - less horrified by the death than by the amateurism.
   - **Desmond "Giggles" Pike**, Children's Entertainer. Booked for a party at
-    this address that does not appear to exist, told to wait in the kitchen, and
-    still waiting nine hours later. Written as the most sensible person in the
-    house rather than a sinister one: the joke is the gap between how he looks
-    and how utterly ordinary he is, which lasts far longer than a creepy-clown
-    bit. That also makes him the most reliable witness on the roster, and the
-    player has to see past the greasepaint to notice.
+	this address that does not appear to exist, told to wait in the kitchen, and
+	still waiting nine hours later. Written as the most sensible person in the
+	house rather than a sinister one: the joke is the gap between how he looks
+	and how utterly ordinary he is, which lasts far longer than a creepy-clown
+	bit. That also makes him the most reliable witness on the roster, and the
+	player has to see past the greasepaint to notice.
   - **Agnes Thorne**, Head Gardener, born on the estate. Twenty-five, born in
-    the gardener's cottage, trained by her mother who held the post before her
+	the gardener's cottage, trained by her mother who held the post before her
     and died a few months ago. Deliberately **not** a joke: the Count and the
     clown are funnier when one person is completely unbothered by either. She
     was arranging the table flowers through dinner and nobody registered her as
@@ -335,10 +335,28 @@ completely unaffected by this scene.
     incriminated person in the house through no fault of her own, a recurring
     red herring the case system produces for free.
 
-- Suspects must be **appended** to `GameManager.CHARACTERS`, never inserted.
-  `case_code()` encodes the cast as a bitmask over those indices, so inserting
-  in the middle silently repoints every case code ever generated at a different
-  cast - and it would look like it still worked.
+- **Case codes are keyed on permanent slots, not array position.** Each
+  character carries a `"slot"` number that is assigned once and never reused,
+  and `case_code()` builds its cast bitmask from those.
+
+  This was originally positional, and that was a real bug rather than a
+  theoretical one: editing the roster silently repointed every code ever
+  generated at a different cast. The code still parsed, still produced a
+  plausible-looking house, and was quietly the wrong mystery. Silent is the
+  worst available failure here, because reproducing a case exactly is the only
+  thing a case code is for.
+
+  With slots, the array can be reordered, added to, or have characters removed
+  and old codes keep meaning what they meant. Retiring a character burns their
+  slot forever; `NEXT_FREE_SLOT` in `GameManager.gd` records what to use next
+  and which numbers are already burned. A code referencing a retired slot is
+  now refused with "code is from an older cast" on the selection screen, rather
+  than decoded into whoever happens to sit there now.
+
+  `Scenes/CaseGeneratorTest.tscn` checks all of this: slot uniqueness, a
+  200-cast encode/decode round trip, and that a retired slot is actually
+  rejected. `GameManager._ready()` also asserts slot uniqueness at startup.
+
 - Art is intentionally simple low-poly primitives (colored boxes for rooms,
   colored capsules with floating name labels for suspects) rather than
   custom 3D models or downloaded asset packs, per your preference.

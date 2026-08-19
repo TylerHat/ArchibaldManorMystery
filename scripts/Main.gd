@@ -52,7 +52,7 @@ const DIALOGUE_FONT_SIZE := 40
 # the front door can face the exterior.
 const GRID := [
 	["Kitchen", "Ballroom", "Conservatory"],
-	["Lounge", "Study", "Dining Room"],
+	["Lounge", "Dining Room", "Study"],
 	["Billiard Room", "Hall", "Library"],
 ]
 
@@ -397,8 +397,12 @@ func _on_seed_input_changed(text: String) -> void:
 		selection_seed_status.text = ""
 		return
 	var parsed := GameManager.parse_case_code(text)
-	if parsed.is_empty():
-		selection_seed_status.text = "not a valid code"
+	if parsed.has("error"):
+		# Show the parser's own reason rather than a blanket "invalid". The one
+		# that matters is "code is from an older cast": that code was perfectly
+		# good, the roster moved under it, and the player deserves to know the
+		# difference between a typo and a stale code.
+		selection_seed_status.text = String(parsed["error"])
 		selection_seed_status.add_theme_color_override("font_color", Color(1, 0.5, 0.5))
 		return
 	selection_seed_status.text = "ok"
@@ -477,7 +481,7 @@ func _on_start_pressed() -> void:
 	GameManager.requested_seed = 0
 	if selection_seed_input != null:
 		var parsed := GameManager.parse_case_code(selection_seed_input.text)
-		if not parsed.is_empty():
+		if not parsed.has("error"):
 			GameManager.requested_seed = int(parsed["seed"])
 	selection_seed_input = null
 	selection_seed_status = null
