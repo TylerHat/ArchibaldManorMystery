@@ -652,9 +652,13 @@ func _build_room(rname: String, center: Vector3, row: int, col: int) -> void:
 	if not _has_neighbor(row, col, "west"):
 		_build_wall_side(rname, center, row, col, "west")
 
+	# Room name, hung in the gap between the tallest ceiling fitting (which tops
+	# out at ManorDressing.CEILING_Y, 2.55) and the underside of the ceiling at
+	# WALL_H. It used to sit at 3.4 - above the walls entirely, which was fine
+	# while the rooms were open-topped and invisible the moment they got a roof.
 	var label := Label3D.new()
 	label.text = rname
-	label.position = Vector3(center.x, 3.4, center.z)
+	label.position = Vector3(center.x, 2.72, center.z)
 	label.font_size = 56
 	label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
 	rooms_node.add_child(label)
