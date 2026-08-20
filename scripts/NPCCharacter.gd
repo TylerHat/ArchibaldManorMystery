@@ -9,7 +9,7 @@ extends CharacterBody3D
 const SPEED := 2.2
 const ARRIVE_DIST := 0.35
 const WANDER_MARGIN := 2.0 # stay this far inside the room's outer walls
-const ROOM_HALF := 6.0 # half of Main.CELL - keep in sync if CELL ever changes
+const ROOM_HALF := 6.5 # half of Main.PITCH - walls now sit on the room boundary
 const WANDER_WAIT_MIN := 1.0
 const WANDER_WAIT_MAX := 3.5
 const SEPARATION_RADIUS := 1.3
@@ -44,11 +44,70 @@ var _is_talking: bool = false
 ## the other three are answering.
 var _in_group_scene: bool = false
 
+# --- character model animation (see SuspectModels.gd, CHARACTER_MODELS.md) ---
+# All null/empty for a suspect still using the fallback capsule, in which case
+# every animation call below is a no-op and nothing else changes.
+var _anim: AnimationPlayer = null
+var _idle_anim: String = ""
+var _walk_anim: String = ""
+var _current_anim: String = ""
+
+## Speed the walk cycle was authored for. The clip is time-scaled by the ratio
+## of actual speed to this, which is what stops the feet skating.
+const WALK_ANIM_REFERENCE_SPEED := 1.4
+const MOVING_THRESHOLD := 0.2
+
 
 func _ready() -> void:
 	add_to_group("npc_characters")
 	_main = get_tree().get_first_node_in_group("main_controller")
 	_wander_wait = randf_range(0.0, WANDER_WAIT_MAX)
+
+
+## Called by Main._spawn_npcs() right after SuspectModels.build_visual(), which
+## is why this is not just done in _ready(): character_id and the model are both
+## set after this node enters the tree.
+func bind_model() -> void:
+	_anim = SuspectModels.find_animation_player(get_node_or_null("ModelRoot"))
+	if _anim == null:
+		return
+
+	var cfg: Dictionary = SuspectModels.OVERRIDES.get(character_id, {})
+	_idle_anim = SuspectModels.pick_animation(_anim, SuspectModels.IDLE_WORDS, String(cfg.get("idle", "")))
+	_walk_anim = SuspectModels.pick_animation(_anim, SuspectModels.WALK_WORDS, String(cfg.get("walk", "")))
+
+	# Downloaded clips very often arrive set to play once and then freeze on the
+	# last frame, which reads as the character dying mid-step. Force both to loop.
+	for n in [_idle_anim, _walk_anim]:
+		if n != "" and _anim.has_animation(n):
+			_anim.get_animation(n).loop_mode = Animation.LOOP_LINEAR
+
+	if _idle_anim == "" and _walk_anim == "":
+		push_warning("SuspectModels: '%s' has an AnimationPlayer but no clip matched idle or walk. Animations present: %s" % [character_id, ", ".join(_anim.get_animation_list())])
+
+	_apply_animation(_idle_anim, 1.0)
+
+
+## Swaps between idle and walk based on how fast the body is actually moving,
+## so it stays correct whether the NPC is wandering, pathing between rooms, or
+## frozen for a conversation.
+func _update_animation() -> void:
+	if _anim == null:
+		return
+	var speed := Vector2(velocity.x, velocity.z).length()
+	if speed > MOVING_THRESHOLD and _walk_anim != "":
+		_apply_animation(_walk_anim, maxf(0.35, speed / WALK_ANIM_REFERENCE_SPEED))
+	else:
+		_apply_animation(_idle_anim, 1.0)
+
+
+func _apply_animation(anim_name: String, speed_scale: float) -> void:
+	if anim_name == "":
+		return
+	_anim.speed_scale = speed_scale
+	if anim_name != _current_anim:
+		_current_anim = anim_name
+		_anim.play(anim_name)
 
 
 func get_interact_prompt() -> String:
@@ -148,6 +207,7 @@ func _physics_process(delta: float) -> void:
 		velocity.x = 0.0
 		velocity.z = 0.0
 		move_and_slide()
+		_update_animation()
 		return
 
 	var desired := Vector3.ZERO
@@ -169,6 +229,7 @@ func _physics_process(delta: float) -> void:
 		velocity.z = move_toward(velocity.z, 0.0, SPEED)
 
 	move_and_slide()
+	_update_animation()
 
 
 ## Steers toward the next waypoint on _path, popping waypoints as they're
