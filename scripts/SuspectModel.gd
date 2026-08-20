@@ -57,7 +57,13 @@ const WALK_ANIMATIONS := ["Walk", "Walk_A", "Walk_Loop", "Walking", "Run", "Runn
 ## in there the alphabetically first one wins, so the answer is never
 ## ambiguous and never depends on filesystem ordering.
 static func find_model_path(character_id: String) -> String:
-	var dir_path := "%s/%s" % [SUSPECTS_DIR, character_id]
+	return find_model_in_dir("%s/%s" % [SUSPECTS_DIR, character_id])
+
+
+## The same lookup against any folder, so things that are not on the suspect
+## roster - Lord Reginald's body in CrimeScene.gd - can use the same
+## drop-a-file-in convention without having to pretend to be a suspect.
+static func find_model_in_dir(dir_path: String) -> String:
 	var dir := DirAccess.open(dir_path)
 	if dir == null:
 		return ""
@@ -91,7 +97,14 @@ static func has_model(character_id: String) -> bool:
 ## with. Never returns null - a bad or unloadable file falls back to the
 ## capsule with a warning rather than leaving an invisible suspect.
 static func build_visual(character_id: String, fallback_color: Color) -> Node3D:
-	var path := find_model_path(character_id)
+	return build_from_dir("%s/%s" % [SUSPECTS_DIR, character_id], character_id, fallback_color)
+
+
+## Builds from an explicit folder, reading tuning and color from `section` of
+## suspect_models.cfg. build_visual() is this with both the folder and the
+## config section derived from a character id.
+static func build_from_dir(dir_path: String, section: String, fallback_color: Color) -> Node3D:
+	var path := find_model_in_dir(dir_path)
 	if path == "":
 		return _build_capsule(fallback_color)
 
@@ -112,15 +125,15 @@ static func build_visual(character_id: String, fallback_color: Color) -> Node3D:
 	if model == null:
 		push_warning(
 			"SuspectModel: could not use '%s' as a 3D model - '%s' stays a capsule."
-			% [path, character_id]
+			% [path, section]
 		)
 		return _build_capsule(fallback_color)
 
 	model.name = "Model"
 	var cfg := ConfigFile.new()
 	var has_cfg := cfg.load(CONFIG_PATH) == OK
-	_apply_tuning(model, cfg, has_cfg, character_id)
-	_apply_recolor(model, cfg, has_cfg, character_id)
+	_apply_tuning(model, cfg, has_cfg, section)
+	_apply_recolor(model, cfg, has_cfg, section)
 	return model
 
 
@@ -184,26 +197,49 @@ static func _apply_tuning(
 ) -> void:
 	var auto_fit := bool(_cfg_value(cfg, has_cfg, character_id, "auto_fit_height", true))
 	var scale_mult := float(_cfg_value(cfg, has_cfg, character_id, "scale", 1.0))
+	var x_offset := float(_cfg_value(cfg, has_cfg, character_id, "x_offset", 0.0))
 	var y_offset := float(_cfg_value(cfg, has_cfg, character_id, "y_offset", 0.0))
+	var z_offset := float(_cfg_value(cfg, has_cfg, character_id, "z_offset", 0.0))
+	# rot_x and rot_z exist for one reason: laying a standing model on its
+	# back. Suspects only ever need rot_y.
+	var rot_x := float(_cfg_value(cfg, has_cfg, character_id, "rot_x", 0.0))
 	var rot_y := float(_cfg_value(cfg, has_cfg, character_id, "rot_y", 0.0))
+	var rot_z := float(_cfg_value(cfg, has_cfg, character_id, "rot_z", 0.0))
+	var center_xz := bool(_cfg_value(cfg, has_cfg, character_id, "center_xz", false))
 
+	# Measured BEFORE any rotation, deliberately: a body tipped onto its back is
+	# still a 1.8m man, and fitting his rotated height to 1.8 would inflate him
+	# into a giant lying on the carpet.
+	var bounds := _model_bounds(model)
 	var final_scale := scale_mult
-	var feet_correction := 0.0
-
-	if auto_fit:
-		var bounds := _model_bounds(model)
-		if bounds.size.y > 0.001:
-			# Whatever units the artist worked in, end up 1.8m tall so the
-			# model matches its own collision capsule and the doorways.
-			final_scale = (BODY_HEIGHT / bounds.size.y) * scale_mult
-			# Sit the lowest point on the floor, so a model whose origin is at
-			# the hips (or anywhere but the soles) still stands on the ground
-			# instead of sinking into it or hovering above it.
-			feet_correction = -bounds.position.y * final_scale
+	if auto_fit and bounds.size.y > 0.001:
+		# Whatever units the artist worked in, end up 1.8m tall so the model
+		# matches its own collision capsule and the doorways.
+		final_scale = (BODY_HEIGHT / bounds.size.y) * scale_mult
 
 	model.scale = Vector3.ONE * final_scale
-	model.rotation_degrees = Vector3(0.0, rot_y, 0.0)
-	model.position.y = feet_correction + y_offset
+	model.rotation_degrees = Vector3(rot_x, rot_y, rot_z)
+	model.position = Vector3.ZERO
+
+	# Where the model actually lands once scaled and rotated. Placing from this
+	# rather than from the raw bounds is what lets a model rotated about its feet
+	# still come to rest on the floor instead of half inside it.
+	var placed := model.transform * bounds
+
+	var pos := Vector3(x_offset, y_offset, z_offset)
+	if auto_fit:
+		# Lowest point on the floor: a model whose origin sits at the hips - or one
+		# rotated until its origin is level with its shoulder - still rests on the
+		# ground rather than sinking or hovering.
+		pos.y -= placed.position.y
+	if center_xz:
+		# Rotating about the feet leaves a lying figure sprawled off to one side of
+		# its own origin. Only wanted when dropping a model onto an existing marker,
+		# like the victim onto the body's collision box, so it stays opt-in and
+		# every standing suspect is untouched.
+		pos.x -= placed.position.x + placed.size.x * 0.5
+		pos.z -= placed.position.z + placed.size.z * 0.5
+	model.position = pos
 
 
 ## Looks up `key` in the suspect's own section first, then [default], then the
@@ -221,8 +257,14 @@ static func _cfg_value(
 	return fallback
 
 
+## Public view of the bounds helper, for callers that need to size a collision
+## box or stand something on a surface. ManorDressing does both.
+static func model_bounds(model: Node3D) -> AABB:
+	return _model_bounds(model)
+
+
 ## Union of every mesh bounding box in the model, in the model root's own
-## space. Used only to work out how tall the thing actually is.
+## space. Used to work out how big the thing actually is.
 static func _model_bounds(model: Node3D) -> AABB:
 	var acc := {"found": false, "aabb": AABB()}
 	# Starts from IDENTITY rather than model.transform: this measures the model

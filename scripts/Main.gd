@@ -176,6 +176,10 @@ var examine_title_label: Label
 var examine_body: RichTextLabel
 var crime_scene: Node3D
 
+## Background furniture, built by ManorDressing from Models/Furniture. Held so
+## a restart can free the whole lot in one call, same as crime_scene.
+var furniture: Node3D
+
 var name_regexes: Dictionary = {} # character_id -> compiled RegEx matching that suspect's name variants
 
 var selection_layer: CanvasLayer
@@ -219,6 +223,10 @@ func _start_game(selected_ids: Array) -> void:
 	_build_name_regexes()
 	_build_world()
 	_build_mansion()
+	# Furniture before the suspects and the body: it also needs room_centers, and
+	# building it first means anything spawned afterwards lands on top of it
+	# rather than inside it.
+	furniture = load("res://Scripts/ManorDressing.gd").build(self, rooms_node)
 	_spawn_npcs()
 	# After the mansion, since it needs room_centers to place anything.
 	crime_scene = load("res://Scripts/CrimeScene.gd").build(self, rooms_node)
@@ -565,7 +573,11 @@ func _build_world() -> void:
 	e.background_color = Color(0.05, 0.05, 0.08)
 	e.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
 	e.ambient_light_color = Color(0.55, 0.53, 0.58)
-	e.ambient_light_energy = 0.7
+	# Dropped from 0.7 when the rooms got ceilings. Ambient here is a flat colour
+	# term, so it ignores geometry entirely - at 0.7 it drowned out the chandeliers
+	# and left every room evenly lit and shapeless. Raise it back toward 0.7 if the
+	# manor now reads too dark for you.
+	e.ambient_light_energy = 0.5
 	env.environment = e
 	add_child(env)
 
@@ -616,6 +628,14 @@ func _build_room(rname: String, center: Vector3, row: int, col: int) -> void:
 	# no strip of missing floor under the doorway gaps in the walls.
 	add_solid_box(rooms_node, rname + "_Floor", Vector3(PITCH, 0.2, PITCH), Vector3(center.x, -0.1, center.z), color)
 
+	# Ceiling, mirroring the floor: PITCH-sized for the same reason, so adjacent
+	# rooms' ceilings butt together instead of leaving a slot of daylight over
+	# every doorway. Its underside sits exactly on WALL_H, level with the top of
+	# the walls. Darker than the floor because it never catches the directional
+	# light - once a room is roofed, everything inside is lit by the ambient term
+	# and by whatever fixtures ManorDressing hung from the ceiling.
+	add_solid_box(rooms_node, rname + "_Ceiling", Vector3(PITCH, 0.2, PITCH), Vector3(center.x, WALL_H + 0.1, center.z), color.darkened(0.45))
+
 	# Each shared boundary between two rooms must only be built ONCE, by
 	# whichever room "owns" it - otherwise two offset wall segments end up
 	# facing each other with a sliver of a gap between them that's narrower
@@ -632,9 +652,13 @@ func _build_room(rname: String, center: Vector3, row: int, col: int) -> void:
 	if not _has_neighbor(row, col, "west"):
 		_build_wall_side(rname, center, row, col, "west")
 
+	# Room name, hung in the gap between the tallest ceiling fitting (which tops
+	# out at ManorDressing.CEILING_Y, 2.55) and the underside of the ceiling at
+	# WALL_H. It used to sit at 3.4 - above the walls entirely, which was fine
+	# while the rooms were open-topped and invisible the moment they got a roof.
 	var label := Label3D.new()
 	label.text = rname
-	label.position = Vector3(center.x, 3.4, center.z)
+	label.position = Vector3(center.x, 2.72, center.z)
 	label.font_size = 56
 	label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
 	rooms_node.add_child(label)

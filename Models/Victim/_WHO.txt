@@ -1,0 +1,9 @@
+Lord Reginald Archibald - the victim
+
+Not a suspect, so he lives here rather than in Models/Suspects/. Same rule
+though: drop ONE model file in this folder and he uses it. The filename does
+not matter.
+
+Using: Doctor_Male_Old.blend
+His colors and his pose are in the [victim] section of
+Models/Suspects/suspect_models.cfg.

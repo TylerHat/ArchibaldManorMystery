@@ -12,6 +12,17 @@ extends Node
 # raycast already knows how to talk to.
 
 const EvidenceScript = preload("res://Scripts/Evidence.gd")
+const SuspectModel = preload("res://Scripts/SuspectModel.gd")
+
+## Reginald is not on the suspect roster, so his model lives here rather than
+## under Models/Suspects/. Same convention: drop one file in, he uses it.
+const VICTIM_MODEL_DIR := "res://Models/Victim"
+
+## How far the body's collision box is lifted off the floor. The box is 0.45
+## tall and sits just about flat on the ground; the model places itself from
+## the floor upwards, so it has to undo this lift to land on the carpet rather
+## than floating a handspan above it.
+const BODY_BOX_LIFT := 0.22
 
 const BODY_COLOR := Color(0.62, 0.15, 0.18)
 const WEAPON_COLOR := Color(0.85, 0.8, 0.5)
@@ -70,7 +81,7 @@ static func build(main: Node3D, parent: Node3D) -> Node3D:
 # ------------------------------------------------------------------ pieces --
 
 static func _build_body(main: Node3D, root: Node3D, case: Dictionary, pos: Vector3) -> void:
-	var body: StaticBody3D = main.add_solid_box(root, "Victim", Vector3(1.8, 0.45, 0.6), pos + Vector3(0, 0.22, 0), BODY_COLOR)
+	var body: StaticBody3D = main.add_solid_box(root, "Victim", Vector3(1.8, 0.45, 0.6), pos + Vector3(0, BODY_BOX_LIFT, 0), BODY_COLOR)
 	_make_evidence(body, "body", "body", "Examine",
 		"%s lies where he fell.\n\n%s" % [GameManager.VICTIM_NAME, _body_text(case)])
 
@@ -82,6 +93,29 @@ static func _build_body(main: Node3D, root: Node3D, case: Dictionary, pos: Vecto
 	label.modulate = Color(1, 0.75, 0.75)
 	label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
 	body.add_child(label)
+
+	_dress_body(body)
+
+
+## Swaps the red placeholder box for whatever model is sitting in
+## Models/Victim/, keeping the box itself as the collider so the Examine
+## raycast, the evidence text and the floating name are all unaffected. An
+## empty folder renders exactly what it always did, so the crime scene is never
+## broken by the model being absent.
+static func _dress_body(body: StaticBody3D) -> void:
+	if SuspectModel.find_model_in_dir(VICTIM_MODEL_DIR) == "":
+		return
+
+	# Hidden before the model is parented, not after: a model that fails to load
+	# comes back as a capsule, which is itself a MeshInstance3D and would other-
+	# wise be hidden along with the box, leaving an invisible body.
+	for child in body.get_children():
+		if child is MeshInstance3D:
+			(child as MeshInstance3D).visible = false
+
+	var model := SuspectModel.build_from_dir(VICTIM_MODEL_DIR, "victim", BODY_COLOR)
+	model.position.y -= BODY_BOX_LIFT
+	body.add_child(model)
 
 
 static func _body_text(case: Dictionary) -> String:
