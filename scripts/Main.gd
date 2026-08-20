@@ -573,7 +573,11 @@ func _build_world() -> void:
 	e.background_color = Color(0.05, 0.05, 0.08)
 	e.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
 	e.ambient_light_color = Color(0.55, 0.53, 0.58)
-	e.ambient_light_energy = 0.7
+	# Dropped from 0.7 when the rooms got ceilings. Ambient here is a flat colour
+	# term, so it ignores geometry entirely - at 0.7 it drowned out the chandeliers
+	# and left every room evenly lit and shapeless. Raise it back toward 0.7 if the
+	# manor now reads too dark for you.
+	e.ambient_light_energy = 0.5
 	env.environment = e
 	add_child(env)
 
@@ -623,6 +627,14 @@ func _build_room(rname: String, center: Vector3, row: int, col: int) -> void:
 	# width), so neighboring floors butt up exactly against each other with
 	# no strip of missing floor under the doorway gaps in the walls.
 	add_solid_box(rooms_node, rname + "_Floor", Vector3(PITCH, 0.2, PITCH), Vector3(center.x, -0.1, center.z), color)
+
+	# Ceiling, mirroring the floor: PITCH-sized for the same reason, so adjacent
+	# rooms' ceilings butt together instead of leaving a slot of daylight over
+	# every doorway. Its underside sits exactly on WALL_H, level with the top of
+	# the walls. Darker than the floor because it never catches the directional
+	# light - once a room is roofed, everything inside is lit by the ambient term
+	# and by whatever fixtures ManorDressing hung from the ceiling.
+	add_solid_box(rooms_node, rname + "_Ceiling", Vector3(PITCH, 0.2, PITCH), Vector3(center.x, WALL_H + 0.1, center.z), color.darkened(0.45))
 
 	# Each shared boundary between two rooms must only be built ONCE, by
 	# whichever room "owns" it - otherwise two offset wall segments end up

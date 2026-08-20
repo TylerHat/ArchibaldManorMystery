@@ -26,6 +26,13 @@ const MODEL_DIR := "res://Models/Furniture"
 ## Main.WALL_H is 3.0; hang ceiling fittings just under it.
 const CEILING_Y := 2.55
 
+## Flat floor props (rugs) are modelled with their base at exactly y=0, which
+## is also exactly where the floor's top surface sits - so the two planes
+## z-fight and the rug flickers in and out as the camera moves. Lifting them a
+## hair breaks the tie. Too small to see, far too big for depth precision to
+## care about at these distances.
+const FLOOR_DECAL_LIFT := 0.012
+
 ## Tried in order, so a model exported out of Blender as .glb drops in beside
 ## the .blend files without anything here changing.
 const MODEL_EXTENSIONS := ["blend", "glb", "gltf", "fbx"]
@@ -82,7 +89,17 @@ static func _place(root: Node3D, centre: Vector3, entry: Dictionary, default_sca
 	var model := inst as Node3D
 	model.name = model_name
 
-	model.scale = Vector3.ONE * float(entry.get("scale", default_scale))
+	# "stretch" is a per-axis multiplier on top of "scale", in the model's OWN
+	# space - so stretching x widens a bookcase along whatever wall it has been
+	# turned to face, rather than along the world X axis. That is almost always
+	# what you want, and it is why the stretch is applied before the rotation.
+	var uniform := float(entry.get("scale", default_scale))
+	var stretch = entry.get("stretch", null)
+	if stretch is Array and (stretch as Array).size() == 3:
+		model.scale = Vector3(uniform * float(stretch[0]),
+				uniform * float(stretch[1]), uniform * float(stretch[2]))
+	else:
+		model.scale = Vector3.ONE * uniform
 	model.rotation_degrees = Vector3(0.0, float(entry.get("rot", 0.0)), 0.0)
 
 	# Where the piece actually sits once scaled and turned. Everything below is
@@ -99,6 +116,8 @@ static func _place(root: Node3D, centre: Vector3, entry: Dictionary, default_sca
 		# "y" is where the BOTTOM of the piece goes: 0 for anything on the
 		# floor, table height for a plate, sill height for a window.
 		pos.y = float(entry.get("y", 0.0)) - box.position.y
+		if String(entry.get("mount", "floor")) == "floor" and box.size.y < 0.15:
+			pos.y += FLOOR_DECAL_LIFT
 
 	if bool(entry.get("solid", true)):
 		# The collider is a plain box around the model rather than its real
@@ -123,7 +142,38 @@ static func _place(root: Node3D, centre: Vector3, entry: Dictionary, default_sca
 		root.add_child(model)
 		model.position = pos
 
+	var light_cfg = entry.get("light", null)
+	if light_cfg is Dictionary:
+		_add_light(root, pos + box.position + box.size * 0.5, light_cfg)
+
 	return true
+
+
+## A light fixture is only geometry - it emits nothing by itself. This hangs a
+## real OmniLight3D in the middle of the shade, so the room is lit by the thing
+## the player can see lighting it.
+##
+## Shadows are OFF by default, deliberately: the manor runs a dozen or so of
+## these at once and shadow-casting omni lights are among the most expensive
+## things in a Forward+ scene. Put "shadow": true on the one or two fixtures
+## where it genuinely reads.
+static func _add_light(root: Node3D, at: Vector3, cfg: Dictionary) -> void:
+	var lamp := OmniLight3D.new()
+	lamp.position = at - Vector3(0.0, float(cfg.get("drop", 0.1)), 0.0)
+	lamp.omni_range = float(cfg.get("range", 8.0))
+	lamp.light_energy = float(cfg.get("energy", 1.6))
+	lamp.light_color = _colour(cfg.get("color", "#ffd9a8"))
+	lamp.shadow_enabled = bool(cfg.get("shadow", false))
+	# Falls off like a bulb instead of ending at a hard sphere edge.
+	lamp.omni_attenuation = float(cfg.get("attenuation", 1.4))
+	root.add_child(lamp)
+
+
+static func _colour(value: Variant) -> Color:
+	if value is Color:
+		return value
+	var text := String(value).strip_edges()
+	return Color.html(text) if Color.html_is_valid(text) else Color(1.0, 0.85, 0.66)
 
 
 # ----------------------------------------------------------------- loading --
