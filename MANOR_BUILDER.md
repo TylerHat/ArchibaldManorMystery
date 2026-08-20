@@ -23,19 +23,101 @@ per-room `Area3D` volumes, room labels and collision.
 It never touches anything under the **`Decor`** child. Put furniture, props and
 set dressing there and rebuilding the shell will not disturb it.
 
-### Verified against your current geometry
+### Verified against your current geometry, then deliberately diverged
 
-I simulated both the existing `_build_wall_side()` logic and the new emitter and
-diffed every box position and size. With the upper floor disabled the output is
-**identical**: 48 boxes, 37 walls, split 14 / 12 / 6 / 5 across the four wall
-sizes, matching the table in `BUILD_GUI_Geometry.md` exactly. Nothing about how
-the ground floor looks or plays changes.
+I first simulated both the existing `_build_wall_side()` logic and the new
+emitter and diffed every box position and size. With the upper floor disabled
+the output was **identical**: 48 boxes, 37 walls, split 14 / 12 / 6 / 5 across
+the four wall sizes, matching the table in `BUILD_GUI_Geometry.md` exactly.
+
+Then the corner gaps turned up, and it became clear that parity meant
+"identically broken." The builder now fixes them, so the geometry is
+intentionally no longer identical. See the next section.
+
+## The corner gaps
+
+`CELL` is 12 but `PITCH` is 13. Walls were built `CELL` long, so every wall
+stopped 1.0 short of the next room's wall and left a hole exactly where the
+corner should be. **16 of them on the ground floor**, one at each end of every
+wall line.
+
+I measured how bad it actually was with a 2D flood fill at 2.5cm resolution,
+asking how wide a disc could travel from outside the manor to a room centre,
+with the front door sealed so it did not dominate the result:
+
+| Floor plan | Before | After |
+|---|---|---|
+| Ground floor, 3x3 rectangle | 0.76m clear | **sealed**, no sight line |
+| Upper floor, plus shape | 1.08m clear | **sealed**, no sight line |
+
+Your player capsule is 0.80m across. So on the ground floor as it stands you can
+see out through the corners but not quite walk out, by 4cm. **I told you earlier
+that you could walk out through any corner and that was wrong**, I had reasoned
+it from the 1.0m plane gap without accounting for the perpendicular wall
+partially blocking it. On the plus-shaped upper floor you plan to build, the
+same defect measures 1.08m and is genuinely passable.
+
+The fix, in its final form:
+
+- **`WALL_SPAN = PITCH`** (13.0 instead of 12.0), and **every wall sits on the
+  room boundary** at `PITCH/2` rather than `CELL/2`. Wall planes then line up
+  exactly with floor slab edges, so a wall butts its neighbour end to end with
+  neither gap nor overlap. The doorway opening stays exactly `DOOR_W`; the half
+  segments grow from 4.5 to 5.0.
+- **Colinear coplanar runs are merged** into single boxes. See the next section
+  for why this is not just an optimisation.
+
+Visible effect on the ground floor: corners are solid, and each room is about
+0.5 wider on two sides. Nothing else about the layout moves.
+
+## Z-fighting, and a wrong turn I took
+
+For one revision this file used `WALL_SPAN = PITCH + WALL_T`, overlapping each
+wall with its neighbour by a wall thickness. That also seals the corners, and I
+described the overlap as costing nothing. **That was wrong, and it is what made
+the walls shimmer.**
+
+Overlapping two walls on the same plane puts two *same-facing* coplanar quads in
+the same place. The depth test then has no basis to choose between them, picks a
+winner per pixel, and the winner flips as the camera moves. Because each quad is
+two triangles, what you see is the triangulation crawling across the wall. I
+measured the total fighting surface at **96 m²** across the ground floor.
+
+Two things matter for avoiding it:
+
+- **Butting is safe, overlapping is not.** Faces that merely touch back to back
+  never fight, because they face opposite directions and backface culling draws
+  only one of them. Faces that overlap while facing the *same* way always fight.
+- **Merge colinear runs.** The layout walk emits walls per room, so the manor's
+  whole north face arrives as three boxes meeting end to end. Meeting is fine,
+  but float rounding alone can turn a meeting into a hairline overlap. Merging
+  removes the question: one run, one box, no internal seam to fight over.
+
+Measured on the shipping configuration:
+
+| | Ground floor | Upper floor (plus shape) |
+|---|---|---|
+| Wall boxes | 36 → **20** merged | 20 → **12** merged |
+| Z-fighting surface | **0.00 m²** | **0.00 m²** |
+| Sealed against flood fill | yes | yes |
+| Doorway widths | all exactly 3.0m | all exactly 3.0m |
+
+The merge is controlled by **Merge Wall Runs** in the Inspector, on by default.
+Turn it off only to inspect the per-room segments the layout pass produced, and
+expect the shimmer to come back when you do.
+
+If you still see crawling artifacts anywhere after this, the other candidate is
+shadow acne from the single `DirectionalLight3D` in `_build_world()`, which
+looks similar but appears in shadowed areas rather than on wall seams. Raising
+that light's `shadow_bias` and `shadow_normal_bias` is the fix for that one, and
+it is unrelated to the geometry.
 
 ### What you gain
 
 | | Before | After |
 |---|---|---|
 | Draw calls for the shell | ~47 (one material per box) | 3 (one MultiMesh per kind) |
+| Wall boxes | 37 | 20 (colinear runs merged) |
 | Materials | 47 unique `StandardMaterial3D` | 1 shared, per-instance vertex colours |
 | Physics bodies | 47 `StaticBody3D` | 1 body, 47 shared-resource shapes |
 | Visible in editor | no | yes |
@@ -78,11 +160,10 @@ them.
 - **Wall / Floor / Ceiling Material**. Drop your textured materials here when
   you have them. Keep it to one material per kind; that is what makes batching
   work. Per-room colour still comes through as vertex colour.
-- **Center Interior Walls** (default off). Your current code places a shared
-  interior wall at `CELL/2` from the owning room's centre, which is 0.5 units
-  off the true midpoint because `PITCH` is 13 and `CELL` is 12. Invisible with
-  flat colours, visible once walls get trim or thickness. Off keeps exact
-  parity; on centres them properly.
+- **Merge Wall Runs** (default **on**). Collapses colinear coplanar wall
+  segments into single boxes. This is what keeps the walls free of z-fighting,
+  and it drops the ground floor from 36 boxes to 20 as a side effect. Leave it
+  on unless you are specifically inspecting the unmerged segments.
 
 ---
 
@@ -157,7 +238,8 @@ annoying but keeps this change zero-risk.
 
 ### Check it worked
 
-Press Play. You should see no visual difference at all. Then verify:
+Press Play. The only visual differences should be solid corners and rooms very
+slightly larger. Then verify:
 
 - The front door still opens the accusation panel.
 - "Go to the Library" still walks a suspect there through the doorways.

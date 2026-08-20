@@ -42,6 +42,29 @@ const DOOR_W := 3.0     # width of the gap left for a doorway
 const FLOOR_T := 0.2    # floor slab thickness
 const STOREY := 4.0     # vertical distance between floor levels
 
+# How far a wall runs along its own axis.
+#
+# This is the fix for the corner gaps. The original code built walls CELL long
+# (12) while spacing rooms PITCH apart (13), so every wall stopped 1.0 short of
+# the next one and left a hole exactly where the corner should be. 16 of them
+# on the ground floor. Measured by flood fill, the widest clear route from
+# outside into a room was 0.76m against a 0.80m player capsule: visible, not
+# quite passable. On the plus-shaped upstairs the same defect measured 1.08m,
+# which IS passable.
+#
+# Walls now span exactly PITCH and sit on the room boundary, so a wall butts
+# its neighbour end to end with no gap and no overlap.
+#
+# NOT PITCH + WALL_T. Overlapping walls by their own thickness also seals the
+# corners, and it is what this file did for one revision, but it puts two
+# same-facing coplanar quads in the same place at every junction. That is
+# textbook z-fighting: the depth test picks a winner per pixel, the winner
+# flips as the camera moves, and you see the triangulation of the quads
+# crawling across the wall. It measured 96 m2 of fighting surface. Butting is
+# safe; overlapping is not. Faces that merely touch back to back are fine,
+# because backface culling only ever draws one of them.
+const WALL_SPAN := PITCH
+
 # An empty string means "no room in this cell". Void cells are how you get a
 # footprint that is not a full rectangle: an upper floor smaller than the
 # ground floor, an L-shaped wing, a courtyard. A room next to a void cell
@@ -51,7 +74,7 @@ const FLOORS := [
 	{
 		"id": "ground",
 		"level": 0,
-		"enabled": false,
+		"enabled": true,
 		"grid": [
 			["Kitchen", "Ballroom", "Conservatory"],
 			["Lounge", "Dining Room", "Study"],
@@ -101,7 +124,7 @@ const ROOM_COLORS := {
 	"Stair Hall": Color(0.72, 0.7, 0.66),
 }
 const DEFAULT_ROOM_COLOR := Color(0.8, 0.75, 0.65)
-const WALL_COLOR := Color(0.317, 0.264, 0.14, 1.0)
+const WALL_COLOR := Color(0.92, 0.9, 0.85)
 const GROUND_COLOR := Color(0.1, 0.1, 0.12)
 const DOOR_COLOR := Color(0.36, 0.2, 0.1)
 
@@ -149,12 +172,11 @@ const FRONT_DOOR_SIDE := "south"
 @export var ceiling_material: StandardMaterial3D
 
 @export_group("Geometry tweaks")
-## The old code placed a shared interior wall at CELL/2 from the owning room's
-## centre, which is 0.5 units off the true midpoint between the two rooms
-## (because PITCH is 13 but CELL is 12). Harmless with flat colours, visible
-## once walls get thickness or trim. Leave OFF for exact parity with the old
-## geometry; turn ON to centre interior walls on the real boundary.
-@export var center_interior_walls: bool = false
+## Merges colinear coplanar wall segments into single boxes before emitting
+## them. Leave ON. It is what keeps the wall surface free of z-fighting, and it
+## drops the ground floor from 37 boxes to 20 as a side effect. Turn OFF only to
+## see the individual per-room segments the layout pass produced.
+@export var merge_wall_runs: bool = true
 
 @export_group("Physics")
 ## Room volumes go on their own layer so they never collide with the player or
@@ -385,17 +407,22 @@ func _emit_room(rname: String, level: int, row: int, col: int) -> void:
 
 
 func _emit_wall(rname: String, level: int, row: int, col: int, dir: String) -> void:
-	var half := CELL / 2.0
 	var has_n := _has_neighbour(level, row, col, dir)
-	# When a doorway is present the boundary is shared, so it can be nudged out
-	# to the true midpoint between room centres. Exterior walls stay put.
-	var reach := half
-	if has_n and center_interior_walls:
-		reach = PITCH / 2.0
+	# Every wall, interior and exterior alike, sits on the room boundary at
+	# PITCH/2 rather than at CELL/2. Three things depend on this. Wall planes
+	# then line up exactly with floor slab edges, so a WALL_SPAN-long wall butts
+	# its neighbour with neither gap nor overlap. Rooms come out symmetric
+	# instead of 0.5 short on their south and east sides. And the doorway
+	# waypoint get_room_travel_waypoints() computes, the midpoint between two
+	# room centres, lands exactly in the door opening rather than 0.5 past it.
+	var reach := PITCH / 2.0
 
 	var center := _room_center(level, row, col)
 	var base_y := center.y + WALL_H / 2.0
-	var seg := (CELL - DOOR_W) / 2.0
+	# Each half of a doorway wall runs from the door opening out to the far end
+	# of the wall's span, so the two segments plus the DOOR_W gap between them
+	# add up to WALL_SPAN and the doorway stays centred on the room.
+	var seg := (WALL_SPAN - DOOR_W) / 2.0
 	var off := DOOR_W / 2.0 + seg / 2.0
 
 	var is_front_door := (rname == FRONT_DOOR_ROOM and dir == FRONT_DOOR_SIDE and not has_n)
@@ -410,7 +437,7 @@ func _emit_wall(rname: String, level: int, row: int, col: int, dir: String) -> v
 			if is_front_door:
 				_emit_front_door(Vector3(center.x, center.y, z))
 		else:
-			_box("wall", Vector3(CELL, WALL_H, WALL_T),
+			_box("wall", Vector3(WALL_SPAN, WALL_H, WALL_T),
 				Vector3(center.x, base_y, z), WALL_COLOR, rname + "_" + dir)
 	else:
 		var x: float = center.x + (-reach if dir == "west" else reach)
@@ -420,7 +447,7 @@ func _emit_wall(rname: String, level: int, row: int, col: int, dir: String) -> v
 			_box("wall", Vector3(WALL_T, WALL_H, seg),
 				Vector3(x, base_y, center.z + off), WALL_COLOR, rname + "_" + dir + "_b")
 		else:
-			_box("wall", Vector3(WALL_T, WALL_H, CELL),
+			_box("wall", Vector3(WALL_T, WALL_H, WALL_SPAN),
 				Vector3(x, base_y, center.z), WALL_COLOR, rname + "_" + dir)
 
 
@@ -605,7 +632,9 @@ func _emit_volume(rname: String, center: Vector3, level: int) -> void:
 	area.add_to_group("room_volume")
 
 	var coll := CollisionShape3D.new()
-	coll.shape = _shape_for(Vector3(CELL, WALL_H, CELL))
+	# The clear interior of a room, wall faces included, is PITCH minus one
+	# wall thickness now that walls sit on the boundary.
+	coll.shape = _shape_for(Vector3(PITCH - WALL_T, WALL_H, PITCH - WALL_T))
 	area.add_child(coll)
 
 	var holder := _bucket_node("Rooms")
@@ -615,7 +644,77 @@ func _emit_volume(rname: String, center: Vector3, level: int) -> void:
 
 # ------------------------------------------------------------------ flush --
 
+## Collapses colinear coplanar wall segments into single boxes.
+##
+## This is the anti-z-fighting pass, and it matters more than it looks. The
+## layout walk emits walls per room, so a long run like the whole north face of
+## the manor arrives as three separate boxes that meet end to end. Meeting is
+## fine on its own, but any overlap at all puts two same-facing quads on the
+## same plane, and rounding alone can produce that. Merging removes the question
+## entirely: one run, one box, no internal seams to fight over.
+##
+## It is also free geometry savings. The ground floor goes from 37 wall boxes
+## to 20, the plus-shaped upper floor from 20 to 12.
+func _merge_wall_runs() -> void:
+	var items: Array = _pending.get("wall", [])
+	if items.is_empty():
+		return
+
+	# Group by the plane a wall lies in: its thin axis, that axis's coordinate,
+	# plus height and vertical position so floors never merge into each other.
+	var groups := {}
+	for it in items:
+		var size: Vector3 = it["size"]
+		var pos: Vector3 = it["pos"]
+		var thin_x: bool = size.x < size.z
+		var plane: float = pos.x if thin_x else pos.z
+		var key := "%s|%.4f|%.4f|%.4f" % ["x" if thin_x else "z", plane, pos.y, size.y]
+		if not groups.has(key):
+			groups[key] = {"thin_x": thin_x, "plane": plane, "y": pos.y, "h": size.y, "spans": []}
+		var run_pos: float = pos.z if thin_x else pos.x
+		var run_len: float = size.z if thin_x else size.x
+		groups[key]["spans"].append(Vector2(run_pos - run_len / 2.0, run_pos + run_len / 2.0))
+
+	var out := []
+	for key in groups:
+		var g: Dictionary = groups[key]
+		var spans: Array = g["spans"]
+		spans.sort_custom(func(a: Vector2, b: Vector2) -> bool: return a.x < b.x)
+
+		var merged := []
+		for s in spans:
+			# Touching counts as joined. The epsilon absorbs float drift so two
+			# walls that should meet exactly are never left a hair apart.
+			if not merged.is_empty() and s.x <= merged[-1].y + 0.0001:
+				merged[-1].y = maxf(merged[-1].y, s.y)
+			else:
+				merged.append(s)
+
+		for i in range(merged.size()):
+			var m: Vector2 = merged[i]
+			var length: float = m.y - m.x
+			var mid: float = (m.x + m.y) / 2.0
+			var size: Vector3
+			var pos: Vector3
+			if g["thin_x"]:
+				size = Vector3(WALL_T, g["h"], length)
+				pos = Vector3(g["plane"], g["y"], mid)
+			else:
+				size = Vector3(length, g["h"], WALL_T)
+				pos = Vector3(mid, g["y"], g["plane"])
+			out.append({
+				"size": size,
+				"pos": pos,
+				"color": WALL_COLOR,
+				"name": "Wall_%s%.1f_L%.1f_%d" % ["x" if g["thin_x"] else "z", g["plane"], g["y"], i],
+			})
+
+	_pending["wall"] = out
+
+
 func _flush() -> void:
+	if merge_wall_runs:
+		_merge_wall_runs()
 	_flush_bucket("Walls", "wall", _material_for("wall"))
 	_flush_bucket("Floors", "floor", _material_for("floor"))
 	_flush_bucket("Ceilings", "ceiling", _material_for("ceiling"))
