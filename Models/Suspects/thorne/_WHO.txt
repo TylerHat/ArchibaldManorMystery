@@ -1,7 +1,10 @@
 Agnes Thorne
-Job: Head Gardener
+Job: Head Gardener, born on the estate
 
 Drop ONE model file in this folder (.blend, .glb, .gltf or .fbx).
 The filename does not matter - the game picks up whatever is here.
 
-Suggested from your Quaternius pack: Worker_Female.blend
+Using: Casual_Female.blend (same model as Emma Moreau).
+Swapped off Worker_Female.blend to get rid of the hard hat - that model has a
+Hat material you can recolor but not remove. Casual_Female has no hat at all.
+Her shirt/pants/hair colors in suspect_models.cfg keep her distinct from Emma.

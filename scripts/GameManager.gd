@@ -22,12 +22,25 @@ const OLLAMA_MODEL := "huihui_ai/llama3.2-abliterate:3b"
 # waiting for text the player didn't want.
 const MAX_RESPONSE_TOKENS := 140
 const SUMMARY_MAX_TOKENS := 340 # four labeled sections need a bit more room
-# Group-scene lines are capped much harder than one-on-one answers: a Hall
-# meetup costs one sequential request PER attendee for every line the
-# detective says, so per-reply length is the entire latency budget. Short,
-# sharp interruptions are better drama than paragraphs anyway. Observed group
-# replies averaged ~35 tokens, so 70 is still roughly double what's used.
-const GROUP_MAX_TOKENS := 70
+# Group-scene lines are capped harder than one-on-one answers: a Hall meetup
+# costs one sequential request PER attendee for every line the detective says,
+# so per-reply length is the entire latency budget. Short, sharp interruptions
+# are better drama than paragraphs anyway.
+#
+# Was 70, justified by observed replies averaging ~35 tokens. The average was
+# accurate and the cap was still wrong: an average of 35 says nothing about the
+# tail, and it was the tail that kept landing mid-sentence - reliably so for
+# Varga, whose entire character instruction is to declaim for several sentences
+# before reaching the point. 130 clears two sentences plus a wrap-up even for
+# the wordiest suspect in the house.
+#
+# Raising it costs nothing on a typical line: num_predict is a ceiling, not a
+# target, so a 35-token reply still takes 35 tokens. The extra budget is only
+# ever spent on the replies that were being cut off - exactly the ones worth
+# paying for. Worst case is ~1.7s more per attendee on a reply that genuinely
+# runs the full length. If meetups start feeling slow, this is the number to
+# bring back down.
+const GROUP_MAX_TOKENS := 130
 
 # Cuts generation off the moment the model stops producing the one thing we
 # asked for. Without these, a model that decides to write the detective's next

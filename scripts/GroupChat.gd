@@ -731,6 +731,13 @@ func _build_turn_prompt(id: String) -> String:
 
 	var here := _display_names(attendees)
 	text += "You are %s. Reply out loud to the room in ONE short line of 1 to 2 sentences. " % String(c.get("name", ""))
+	# The one-on-one prompt has carried this instruction for a while; the group
+	# prompt never did, which left the token cap as the only thing bounding
+	# length - and a cap can only ever truncate mid-word. Asking the model to
+	# land the sentence itself is what actually fixes a clipped line; the
+	# raised GROUP_MAX_TOKENS is just the headroom to do it in.
+	text += "Always finish your sentence - if you are running long, close it off in the next "
+	text += "few words rather than trailing off mid-thought. "
 	text += "You may disagree with what another guest just said, or call them out if you believe they "
 	text += "are lying. "
 	# The whole reason a meetup is worth the extra requests: an innocent who
