@@ -1,6 +1,13 @@
-class_name SuspectModel
 extends RefCounted
 # Builds the visual body that stands under each suspect's CharacterBody3D.
+#
+# Reached by path, not by class_name: Main.gd and NPCCharacter.gd each hold a
+# `const SuspectModel = preload("res://Scripts/SuspectModel.gd")`. A class_name
+# here works most of the time, but Godot registers global classes during a
+# filesystem scan that can run *after* it parses the scripts using them - so
+# the first launch after adding this file, or a fresh clone, fails with
+# 'Identifier "SuspectModel" not declared in the current scope'. preload
+# resolves at parse time from the path and cannot lose that race.
 #
 # Drop a model file (.blend, .glb, .gltf or .fbx) into
 #     res://Models/Suspects/<character_id>/

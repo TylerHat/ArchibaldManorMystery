@@ -6,6 +6,8 @@ extends CharacterBody3D
 # separation steering keeps multiple NPCs sharing a room from wandering
 # into each other; the CharacterBody3D collision shape is the hard backstop.
 
+const SuspectModel = preload("res://Scripts/SuspectModel.gd")
+
 const SPEED := 2.2
 const ARRIVE_DIST := 0.35
 const WANDER_MARGIN := 2.0 # stay this far inside the room's outer walls

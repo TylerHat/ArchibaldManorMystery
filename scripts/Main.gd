@@ -5,6 +5,10 @@ extends Node3D
 # the front door call into (via the "main_controller" group) to open dialogue
 # / accusation panels.
 
+# By path rather than by class_name, so a fresh clone can't hit the global
+# class scan-order race - see the header of SuspectModel.gd.
+const SuspectModel = preload("res://Scripts/SuspectModel.gd")
+
 const CELL := 12.0
 const PITCH := 13.0
 const WALL_H := 3.0
