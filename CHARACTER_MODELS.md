@@ -39,6 +39,41 @@ You do not have to get the model "right" before dropping it in.
 
 The one thing you may have to set by hand is **facing**, covered in Part 7.
 
+### The one thing it cannot fix: external textures
+
+A `.glb` can either **embed** its texture or **point at a file next to it**. If it
+points, and you copy only the `.glb`, the model imports fine, animates fine, and
+renders **plain white**.
+
+Kenney's packs point. Open a `.glb` in a text editor and search for `.png`: if
+you find something like `Textures/texture-j.png`, that file has to come with it,
+in a folder of that exact name, alongside the model.
+
+```
+Models/Suspects/
+    blackwood.glb          <- wants Textures/texture-a.png
+    varga.glb              <- wants Textures/texture-j.png
+    Textures/
+        texture-a.png
+        texture-j.png
+        ...
+```
+
+So the rule is: **copy the whole `Models/<format>/` folder from the download,
+not just the model files.** Then rename the models to the character ids and
+leave everything else where it is.
+
+### Forcing a reimport
+
+Godot caches the result of importing a model. If it imported once while the
+texture was missing, dropping the texture in later does **not** fix it on its
+own, because the model itself has not changed and Godot sees no reason to redo
+the work.
+
+To force it: select the `.glb` files in the **FileSystem** dock, right click,
+choose **Reimport**. Touching the files so their modified time changes works too.
+
+
 ---
 
 ## Part 1: Where to get models
@@ -276,6 +311,8 @@ is the thing you want working when you are halfway through adding twelve models.
 | Suspect slides backwards while facing you | The model faces the opposite way to what Godot expects | In `SuspectModels.OVERRIDES`, add `"varga": {"yaw": 0.0}`. If that is worse, try `90.0` or `-90.0` |
 | Suspect faces sideways while walking | Same thing, quarter turn | Try `"yaw": 90.0`, then `-90.0` |
 | Still a capsule | Filename does not match the id, or the extension is wrong | Check spelling exactly, lowercase, `.glb`. `cross_natalie.glb`, not `Natalie.glb` |
+| Model is plain white, no colours | Its texture is an external file that was not copied | Copy the download's `Textures/` folder into `Models/Suspects/`, then force a reimport. See above |
+| Textures copied but still white | Godot cached the import from when the texture was missing | Select the `.glb` files, right click, **Reimport** |
 | Standing perfectly still, no breathing | No animations in the file, or none matched | Check Godot's Output panel; the code prints which animations it found. Add `"idle": "<exact name>"` to the override |
 | Frozen in a T-pose with arms out | The only animation is the rest pose | Get an idle from Mixamo |
 | Feet sunk into the floor or floating | Auto-fit could not measure the model | Add `"y_offset": 0.15` to the override and adjust |
