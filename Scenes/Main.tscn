@@ -1,6 +1,13 @@
-[gd_scene load_steps=2 format=3]
+[gd_scene format=3 uid="uid://b53pb2f3uj50h"]
 
-[ext_resource type="Script" path="res://Scripts/Main.gd" id="1"]
+[ext_resource type="Script" uid="uid://dlgi8a8pynmu7" path="res://Scripts/Main.gd" id="1"]
+[ext_resource type="Script" uid="uid://dyelc4g718ybs" path="res://Scripts/ManorBuilder.gd" id="2_idj7w"]
 
-[node name="Main" type="Node3D"]
+[node name="Main" type="Node3D" unique_id=858224697]
 script = ExtResource("1")
+
+[node name="Manor" type="Node3D" parent="." unique_id=915662854]
+script = ExtResource("2_idj7w")
+center_interior_walls = false
+
+[node name="Decor" type="Node3D" parent="Manor" unique_id=218169484]

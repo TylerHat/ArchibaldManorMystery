@@ -1,0 +1,6 @@
+[gd_scene format=3 uid="uid://bopttest00001"]
+
+[ext_resource type="Script" path="res://Scripts/DialogueOptTest.gd" id="1_opttest"]
+
+[node name="DialogueOptTest" type="Node"]
+script = ExtResource("1_opttest")

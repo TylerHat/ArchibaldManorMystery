@@ -41,9 +41,29 @@ signal roster_changed()
 ## conversation; 0 means there's no one left to talk to.
 signal quorum_lost(remaining)
 
-## How many of a suspect's own lines from the current scene get replayed into
-## their turn prompt so they don't contradict themselves mid-confrontation.
-const OWN_LINE_RECAP := 3
+## How many spoken lines of the current scene get replayed into a turn prompt.
+##
+## This is a straight latency dial and the most expensive number in the file.
+## The scene is rendered fresh on every turn, so unlike the history it is NOT
+## cached - every line here is re-read by the model for every attendee, every
+## time the detective says anything. At ~40 tokens a line and ~1,150 tokens/sec
+## of prefill, each 10 lines costs roughly a third of a second per turn, which
+## in a four-handed room is 1.4 seconds per line the player types.
+##
+## 16 is about three rounds of a four-handed scene or five of a two-hander -
+## enough for a suspect to stay consistent with what they just said, which is
+## all this needs to do. Anything older that still matters is in their schedule
+## and their private recap, both of which are also in the prompt.
+const SCENE_RENDER_MAX_LINES := 16
+
+## How many of a suspect's own lines survive into the one digest written to
+## their permanent memory when the scene ends.
+const DIGEST_OWN_LINES := 4
+
+## How many lines said BY OTHERS survive into that digest. Kept smaller than
+## their own: what matters afterwards is what they committed to in public, plus
+## enough of the accusations to know what they were answering.
+const DIGEST_OTHER_LINES := 4
 
 var active: bool = false
 var attendees: Array = [] # character_ids, snapshotted when the scene opens
@@ -90,21 +110,49 @@ var _gm: Node = null
 var _next_token: int = 0
 var _pending_token: int = -1 # -1 means "not waiting on anything"
 
-## What each attendee has heard but not yet been given a turn to react to.
+## Where in scene_log each departed attendee stopped hearing things.
 ##
-## Everything a character hears has to be stored under the "user" role - the
-## chat API has no third role for "someone else in the room". Writing each line
-## as its own user message therefore made the user role mean the detective on
-## one line and another guest on the next, and a small model reading that
-## history has no way to tell which of them is now talking to it. That is what
-## produced suspects calling the detective by another suspect's name and
-## replying to remarks nobody had just made.
-##
-## So lines are buffered here and flushed as ONE narrated message on that
-## character's turn (see _flush_heard). The user role then always means the
-## same thing - the narrator relaying the scene - and other guests appear only
-## as quoted, clearly-attributed speech inside it.
-var _heard_buffer: Dictionary = {} # character_id -> Array[String]
+## Someone sent out of the Hall mid-scene should remember the argument up to the
+## moment they left and nothing after it. Absent from this dictionary means
+## "still here", i.e. heard everything.
+var _left_at: Dictionary = {} # character_id -> scene_log index at departure
+
+## Where in scene_log the CURRENT round began - i.e. the index of the
+## detective's latest line. _render_scene_for() stops here, because everything
+## from this point on is presented separately at the end of the turn prompt.
+var _round_log_start: int = 0
+
+
+# --- How the room reaches the model -----------------------------------------
+#
+# Everything a character hears has to be sent under the "user" role - the chat
+# API has no third role for "someone else in the room". Writing each line as its
+# own user message made the user role mean the detective on one line and another
+# guest on the next, and a small model reading that history has no way to tell
+# which of them is now talking to it. That produced suspects calling the
+# detective by another suspect's name and answering remarks nobody had made.
+#
+# So the whole scene is rendered as ONE narrated block, on demand, per turn (see
+# _render_scene_for). The user role then always means the same thing - the
+# narrator relaying the room - and other guests appear only as quoted,
+# clearly-attributed speech inside it.
+#
+# That block is EPHEMERAL. It used to be written permanently into every
+# attendee's history by note_to_character() as the scene went along, which cost
+# more than it looked:
+#
+#   - Storage was O(N^2) per round. Every line spoken was copied into all N-1
+#     other attendees' histories, so a 4-handed scene deposited ~600 tokens of
+#     duplicated text per round and an 8-handed one ~2,800.
+#   - It landed in the MIDDLE of each history, where compaction can't reach it
+#     without invalidating the model's cached prefix.
+#   - Repeat meetups stacked up: three scenes with the same suspect left three
+#     priming blocks and three scene-enders permanently in their memory.
+#
+# Rendering instead of storing fixes all three, and puts the volatile text at
+# the very end of the prompt where it costs a few hundred tokens of prefill
+# rather than invalidating everything before it. What survives the scene is one
+# digest written by _note_scene_ended().
 
 
 func _ready() -> void:
@@ -126,10 +174,11 @@ func start(ids: Array) -> void:
 	attendees = ids.duplicate()
 	scene_log.clear()
 	muted.clear()
-	_heard_buffer.clear()
+	_left_at.clear()
 	_queue.clear()
 	_speaking_id = ""
 	_round_start = 0
+	_round_log_start = 0
 	_direct_round = false
 	_last_player_line = ""
 	_last_player_action = ""
@@ -137,7 +186,9 @@ func start(ids: Array) -> void:
 	_pending_token = -1
 	active = true
 
-	_prime_attendees()
+	# Nothing is written to anyone's memory here any more. The group-scene
+	# instruction that used to be primed in is rendered into each turn prompt
+	# instead - see _group_role_instruction().
 
 	var names := _display_names(attendees)
 	_add_line("", "%s are gathered in the hall, waiting for you to speak." % _join_names(names), "stage")
@@ -155,7 +206,7 @@ func stop() -> void:
 	active = false
 	attendees.clear()
 	muted.clear()
-	_heard_buffer.clear()
+	_left_at.clear()
 	_queue.clear()
 	_speaking_id = ""
 	_direct_round = false
@@ -164,31 +215,79 @@ func stop() -> void:
 	_set_state("idle")
 
 
-## Queues a line for everyone in the room except `except_id`, to be narrated to
-## each of them when their turn comes round.
-func _broadcast(line: String, except_id: String = "") -> void:
-	for id in attendees:
-		if id == except_id:
-			continue
-		if not _heard_buffer.has(id):
-			_heard_buffer[id] = []
-		_heard_buffer[id].append(line)
+## How much of scene_log this character heard: everything, unless they were sent
+## out of the room, in which case everything up to the moment they left.
+func _heard_upto(id: String) -> int:
+	return int(_left_at.get(id, scene_log.size()))
 
 
-## Turns everything one suspect has heard since their last turn into a single
-## narrated message and writes it to their memory. Returns false if they hadn't
-## missed anything.
+## One spoken line of the scene, written as this character experienced it.
+## Returns "" for entries that should never reach the model - engine stage
+## directions and the echo of orders the detective typed.
 ##
-## The framing matters as much as the consolidation: the block is explicitly a
-## report of the room, the detective is named in capitals as the person
-## questioning them, and every other voice is tagged as a guest who is NOT the
-## detective. There is then nothing in their history that a later private
-## question could be confused with.
-func _flush_heard(id: String) -> bool:
-	var lines: Array = _heard_buffer.get(id, [])
-	if lines.is_empty():
-		return false
-	_heard_buffer[id] = []
+## Uses short tags (DETECTIVE / GUEST / YOU) rather than spelling out who is who
+## on every line. The convention is explained once in the block header instead,
+## which is worth doing carefully: the long form cost about fourteen tokens of
+## framing per line, and this block is re-read on every attendee's turn, so on a
+## sixteen-line scene that framing alone was ~220 tokens of prefill per turn -
+## paid four times over in a four-handed room, for every line the player types.
+##
+## A bracketed gesture is still split out as something they SAW rather than
+## words they heard; otherwise the next suspect reads "(nods)" as speech and
+## starts answering the stage direction.
+func _render_line_for(id: String, entry: Dictionary) -> String:
+	var kind := String(entry["kind"])
+	if kind != "say" and kind != "action":
+		return "" # "stage" is UI narration, "command" is deliberately never sent
+
+	var speaker := String(entry["speaker_id"])
+	var text := String(entry["text"])
+
+	if speaker == "":
+		if kind == "action":
+			return "DETECTIVE (does this, really happening): %s" % text
+		return "DETECTIVE: \"%s\"" % text
+
+	if speaker == id:
+		return "YOU: \"%s\"" % text
+
+	var who := String(_gm.get_character(speaker).get("name", "someone"))
+	var parts: Dictionary = _gm.parse_stage_action(text)
+	var act := String(parts["action"])
+	var said := String(parts["speech"])
+	if act != "":
+		var out := "GUEST %s (does this): %s" % [who, act]
+		if said != "":
+			out += " and says: \"%s\"" % said
+		return out
+	return "GUEST %s: \"%s\"" % [who, text]
+
+
+## The confrontation so far, as one narrated block, from this character's point
+## of view. Built fresh every turn and never stored - see the note above
+## _left_at.
+##
+## Stops BEFORE the detective's current line. That line and any replies to it
+## already appear at the very end of the turn prompt, where they have to be so
+## the model answers the right thing; including them here as well would send the
+## same text twice on every single turn.
+##
+## Returns "" before anyone has said anything, so the opening turn of a scene
+## isn't preceded by an empty transcript header.
+func _render_scene_for(id: String) -> String:
+	var limit: int = min(_heard_upto(id), _round_log_start)
+	var rendered := []
+	for i in range(min(limit, scene_log.size())):
+		var line := _render_line_for(id, scene_log[i])
+		if line != "":
+			rendered.append(line)
+	if rendered.is_empty():
+		return ""
+
+	var dropped := 0
+	if rendered.size() > SCENE_RENDER_MAX_LINES:
+		dropped = rendered.size() - SCENE_RENDER_MAX_LINES
+		rendered = rendered.slice(dropped)
 
 	var others := []
 	for other in attendees:
@@ -199,58 +298,105 @@ func _flush_heard(id: String) -> bool:
 	if others.is_empty():
 		text += " Everyone else has left; only the detective is still with you.]\n"
 	else:
-		text += " Also present: %s.]\n" % _join_names(others)
-	text += "Since you last spoke, in order:\n"
-	for line in lines:
+		text += " Also present: %s.\n" % _join_names(others)
+	text += "DETECTIVE is the person questioning you. GUEST lines are other guests in this room, "
+	text += "never the detective. YOU lines are your own words, said out loud in front of everyone.]\n"
+	if dropped > 0:
+		text += "Earlier, %d line(s) not repeated. Most recently:\n" % dropped
+	else:
+		text += "Said in this room so far:\n"
+	for line in rendered:
 		text += "  %s\n" % line
-	_gm.note_to_character(id, text)
-	return true
+	return text
 
 
-## Closes the scene out in one suspect's memory: the room emptied, and from
-## here on they are alone with the detective.
+## Writes the ONE thing a Hall meetup leaves behind in a suspect's permanent
+## memory: a digest of what they committed to in public, what was said about
+## them, and an explicit marker that the room has emptied.
 ##
-## This matters more than it looks. Everything a suspect hears is stored with
-## role "user" - the detective's questions AND every other guest's line, since
-## there's no third role to put them in. So after a meetup their history reads
-## as one long stream of "user" messages in which the user has been speaking as
-## Eleanor, as Evelyn, and as the detective. Nothing marks where the scene
-## ended, so the next private question looks like more of the same and the
-## model starts addressing the detective by another guest's name. An explicit
-## end-of-scene marker is what breaks that.
+## The end-of-scene marker matters more than it looks. Everything a suspect is
+## told arrives with role "user" - the detective's questions AND every other
+## guest's line, since there's no third role to put them in. Without something
+## saying where the scene stopped, the next private question looks like more of
+## the same and the model starts addressing the detective by another guest's
+## name.
+##
+## The digest matters for a different reason: it is what makes the confrontation
+## still count an hour later. A suspect who insisted on something in front of
+## witnesses should not be able to quietly drop it once the room clears, and the
+## detective should be able to press them on it privately afterwards.
 func _note_scene_ended(id: String) -> void:
 	if _gm == null:
 		return
-	# Anything they heard but never got a turn to answer - a silenced suspect
-	# who listened to the whole scene, most often - still has to reach memory,
-	# or being muted would mean being deaf after all.
-	_flush_heard(id)
-	_heard_buffer.erase(id)
-	var text := "[The gathering in the hall is over. The other guests have left and gone back to their own rooms. "
-	text += "You are alone with the detective again. Everything said to you from this point on is the detective "
-	text += "speaking to you privately - no other guest is present, and nothing you are told now comes from one of them. "
-	text += "Never address the detective by another guest's name, and do not reply to the other guests: they cannot hear you.]"
+
+	var limit := _heard_upto(id)
+	var mine := []
+	var theirs := []
+	for i in range(min(limit, scene_log.size())):
+		var e: Dictionary = scene_log[i]
+		if String(e["kind"]) != "say":
+			continue
+		var speaker := String(e["speaker_id"])
+		if speaker == id:
+			mine.append(String(e["text"]))
+		elif speaker != "":
+			var who := String(_gm.get_character(speaker).get("name", "someone"))
+			theirs.append("%s said: \"%s\"" % [who, _gm._condense(String(e["text"]))])
+
+	var present := []
+	for other in attendees:
+		if other != id:
+			present.append(String(_gm.get_character(other).get("name", "")))
+
+	var text := "[THE GATHERING IN THE HALL IS OVER."
+	if not present.is_empty():
+		text += " You were questioned in front of %s.]" % _join_names(present)
+	else:
+		text += "]"
+	text += "\n"
+
+	if not mine.is_empty():
+		if mine.size() > DIGEST_OWN_LINES:
+			mine = mine.slice(mine.size() - DIGEST_OWN_LINES)
+		text += "What YOU said out loud, in front of them - these are your own words and they still stand:\n"
+		for line in mine:
+			text += "  - \"%s\"\n" % _gm._condense(line)
+	if not theirs.is_empty():
+		if theirs.size() > DIGEST_OTHER_LINES:
+			theirs = theirs.slice(theirs.size() - DIGEST_OTHER_LINES)
+		text += "What the others said while you were standing there:\n"
+		for line in theirs:
+			text += "  - %s\n" % line
+
+	text += "The other guests have left and gone back to their own rooms. You are alone with the "
+	text += "detective again. Everything said to you from this point on is the detective speaking to you "
+	text += "privately - no other guest is present, and nothing you are told now comes from one of them. "
+	text += "Never address the detective by another guest's name, and do not reply to the other guests: "
+	text += "they cannot hear you."
+
 	_gm.note_to_character(id, text)
 
 
-## Appends the one-time group-scene instruction to each attendee's private
-## memory. This is what actually produces suspects turning on each other -
-## left to itself a small model has everyone in the room politely agree.
-func _prime_attendees() -> void:
-	if _gm == null:
-		return
+## The standing instruction for how to behave in a confrontation. This is what
+## actually produces suspects turning on each other - left to itself a small
+## model has everyone in the room politely agree.
+##
+## Rendered into each turn prompt rather than written once into memory. Written
+## once, it sat further and further back in the context as the scene went on,
+## precisely as the scene got heated enough to need it; and it accumulated a
+## fresh permanent copy every time a new meetup opened.
+func _group_role_instruction(id: String) -> String:
 	var present := _join_names(_display_names(attendees))
-	for id in attendees:
-		var text := "[GROUP SCENE - the Hall] The detective has gathered several guests together in the hall. "
-		text += "Present with you: %s. " % present
-		text += "You are all speaking out loud, in front of each other - anything you say here is heard by everyone in the room. "
-		if id == _gm.murderer_id:
-			text += "Attention on you is dangerous. You may deflect suspicion onto someone else, question another guest's "
-			text += "account of the evening, or point out inconsistencies in what they say - but never confess."
-		else:
-			text += "If another guest says something you know to be false, or that contradicts what they said earlier, "
-			text += "say so plainly and in front of everyone."
-		_gm.note_to_character(id, text)
+	var text := "[GROUP SCENE - the Hall] The detective has gathered several guests together in the hall. "
+	text += "Present with you: %s. " % present
+	text += "You are all speaking out loud, in front of each other - anything you say here is heard by everyone in the room. "
+	if id == _gm.murderer_id:
+		text += "Attention on you is dangerous. You may deflect suspicion onto someone else, question another guest's "
+		text += "account of the evening, or point out inconsistencies in what they say - but never confess."
+	else:
+		text += "If another guest says something you know to be false, or that contradicts what they said earlier, "
+		text += "say so plainly and in front of everyone."
+	return text + "\n\n"
 
 
 # --------------------------------------------------------- floor control --
@@ -322,6 +468,10 @@ func allow_all() -> void:
 func dismiss(id: String) -> bool:
 	if not active or not attendees.has(id):
 		return false
+	# Freeze what they heard at the moment they walked out, before the exit line
+	# and anything the remaining guests go on to say. Someone sent out of the
+	# room should not remember being talked about behind their back.
+	_left_at[id] = scene_log.size()
 	attendees.erase(id)
 	muted.erase(id)
 	_queue.erase(id)
@@ -424,22 +574,20 @@ func submit_player_line(raw: String, direct_id: String = "") -> void:
 		return
 	_last_player_line = text
 
+	# Everything from here on belongs to the round that is about to start, and is
+	# shown at the END of each turn prompt rather than in the room transcript.
+	_round_log_start = scene_log.size()
+
 	if _last_player_action != "":
 		_add_line("", _last_player_action, "action")
 	if _last_player_speech != "":
 		_add_line("", _last_player_speech, "say")
 
-	# Everyone present hears the detective, including anyone who won't reply
-	# this round - being silenced doesn't make you deaf. Buffered rather than
-	# written straight to memory: it gets narrated to each suspect on their
-	# turn, together with anything else they missed.
-	if _last_player_action != "":
-		_broadcast("THE DETECTIVE (the person questioning you) DOES THIS, right now, in this room - it is really happening: %s" % _last_player_action)
-	if _last_player_speech != "":
-		var heard := "THE DETECTIVE (the person questioning you) said to the room: \"%s\"" % _last_player_speech
-		if direct_id != "":
-			heard = "THE DETECTIVE (the person questioning you) said to %s: \"%s\"" % [_speaker_label(direct_id), _last_player_speech]
-		_broadcast(heard)
+	# Everyone present hears the detective, including anyone who won't reply this
+	# round - being silenced doesn't make you deaf. Nothing needs broadcasting to
+	# make that true any more: the two _add_line() calls above put it in
+	# scene_log, and _render_scene_for() reads the whole room out of scene_log on
+	# each attendee's turn. A muted suspect is therefore deaf to nothing.
 
 	_begin_round(direct_id)
 
@@ -495,10 +643,6 @@ func _next_turn() -> void:
 		_next_turn()
 		return
 
-	# Narrate everything they've missed into memory as one message, before the
-	# request snapshots their history.
-	_flush_heard(id)
-
 	_speaking_id = id
 	turn_started.emit(id)
 	# Witnesses are everyone else in the room right now, muted or not - being
@@ -512,11 +656,17 @@ func _next_turn() -> void:
 	_gm.ask_group_member(id, _build_turn_prompt(id), _last_player_line, witnesses, _pending_token)
 
 
-## The instruction handed to one attendee when it's their turn. It carries no
-## account of what was just said: that's already in their history as the single
-## narrated block _flush_heard() wrote immediately before this, so repeating it
-## would both waste context and tell the story twice. This prompt is ephemeral -
-## GameManager sends it but never stores it.
+## The whole of one attendee's turn: the standing group-scene instruction, their
+## own account, everything the room has said, and finally the detective's line.
+## Ephemeral - GameManager sends it and never stores it.
+##
+## It now carries the scene itself, which it did not used to. Previously each
+## line was written permanently into every attendee's history as it happened;
+## rendering it here instead keeps stored memory small, keeps the volatile text
+## at the end of the prompt where it doesn't invalidate the cached prefix, and
+## stops repeat meetups piling up in everyone's memory. See the note above
+## _left_at for the full reasoning.
+##
 ## Order here is the whole point, and it is easy to get backwards.
 ##
 ## Reference material (their own past claims) goes FIRST; the question they
@@ -531,6 +681,11 @@ func _build_turn_prompt(id: String) -> String:
 	var c: Dictionary = _gm.get_character(id)
 	var text := ""
 
+	# How to behave in a confrontation. Re-stated every turn rather than primed
+	# once at the start of the scene, so it doesn't recede into the distance
+	# exactly as the argument gets heated enough to need it.
+	text += _group_role_instruction(id)
+
 	# Their movements, replayed at the generation point. It is already in their
 	# system prompt, but by the third round of a meetup that prompt is a dozen
 	# messages back behind everyone else's chatter, and generation is dominated
@@ -543,16 +698,15 @@ func _build_turn_prompt(id: String) -> String:
 		text += account
 		text += "\n"
 
-	# Their own account so far - private first, then this scene. Kept at the
-	# top as background they must not contradict, not as the thing to respond to.
+	# What they told the detective privately, before this scene. Kept at the top
+	# as background they must not contradict, not as the thing to respond to.
+	# Their public lines from THIS scene are no longer duplicated here - they
+	# appear in the room transcript below, labelled "YOU said", which is both
+	# fewer tokens and a truer account of the order things happened in.
 	var recap: String = _gm.private_recap(id)
-	var said: String = _own_recent_lines(id)
-	if recap != "" or said != "":
+	if recap != "":
 		text += "[YOUR OWN ACCOUNT SO FAR - background only, not the question]\n"
-		if recap != "":
-			text += "Told to the detective in private:\n" + recap
-		if said != "":
-			text += "Already said out loud in this room:\n" + said
+		text += "Told to the detective in private:\n" + recap
 		# These two rules have to be separated carefully or they fight, and the
 		# model resolves the fight in the worst possible way.
 		#
@@ -567,6 +721,13 @@ func _build_turn_prompt(id: String) -> String:
 		text += "an account you have already given - if you are challenged about it, hold to it. "
 		text += "You may add new detail or say it a different way; just do not repeat a line "
 		text += "word for word.\n\n"
+
+	# The room itself, as this character heard it.
+	var scene: String = _render_scene_for(id)
+	if scene != "":
+		text += scene
+		text += "Anything above marked YOU said is your own words, in front of witnesses - they still "
+		text += "stand, and you must not reverse or deny them. Do not repeat a line word for word.\n\n"
 
 	var here := _display_names(attendees)
 	text += "You are %s. Reply out loud to the room in ONE short line of 1 to 2 sentences. " % String(c.get("name", ""))
@@ -631,25 +792,6 @@ func _build_turn_prompt(id: String) -> String:
 	return text
 
 
-## This suspect's own spoken lines from the current scene, oldest first, capped
-## to the most recent few. Pulled from scene_log rather than the transcript
-## because it's already scene-scoped - what they said in a meetup an hour ago
-## isn't what they're at risk of contradicting right now.
-func _own_recent_lines(id: String) -> String:
-	var mine := []
-	for e in scene_log:
-		if e["kind"] == "say" and String(e["speaker_id"]) == id:
-			mine.append(String(e["text"]))
-	if mine.is_empty():
-		return ""
-	if mine.size() > OWN_LINE_RECAP:
-		mine = mine.slice(mine.size() - OWN_LINE_RECAP)
-	var out := ""
-	for line in mine:
-		out += "- %s\n" % line
-	return out
-
-
 # ------------------------------------------------------ response handling --
 # Connected to GameManager.group_response / group_error from GameManager._ready().
 
@@ -658,26 +800,13 @@ func _on_group_response(character_id: String, text: String, token: int) -> void:
 		return
 	_pending_token = -1
 	_speaking_id = ""
+	# Everyone else in the room heard it, whether or not they reply this round.
+	# One _add_line() is all that takes now: it lands in scene_log, and
+	# _render_scene_for() reads each attendee's view out of scene_log on their
+	# turn - including splitting a bracketed gesture out as something they SAW
+	# rather than words they heard.
 	_add_line(character_id, text, "say")
 	_round_replies.append({"id": character_id, "text": text})
-
-	# Everyone else in the room heard it, whether or not they reply this round.
-	# A bracketed gesture in the reply is relayed as something the others SAW,
-	# not as words - otherwise the next suspect hears "(nods)" as speech and
-	# starts answering the stage direction.
-	var c: Dictionary = _gm.get_character(character_id)
-	var who := String(c.get("name", ""))
-	var parts: Dictionary = _gm.parse_stage_action(text)
-	var act := String(parts["action"])
-	var said := String(parts["speech"])
-	var heard := ""
-	if act != "":
-		heard = "%s (another guest in the room - NOT the detective) did this: %s" % [who, act]
-		if said != "":
-			heard += ", and said out loud: \"%s\"" % said
-	else:
-		heard = "%s (another guest in the room - NOT the detective) said out loud: \"%s\"" % [who, text]
-	_broadcast(heard, character_id)
 
 	_next_turn()
 
