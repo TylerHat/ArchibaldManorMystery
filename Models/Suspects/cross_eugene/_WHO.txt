@@ -1,0 +1,7 @@
+Eugene Cross
+Job: Butler
+
+Drop ONE model file in this folder (.blend, .glb, .gltf or .fbx).
+The filename does not matter - the game picks up whatever is here.
+
+Suggested from your Quaternius pack: OldClassy_Male.blend

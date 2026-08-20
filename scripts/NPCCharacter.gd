@@ -44,6 +44,16 @@ var _is_talking: bool = false
 ## the other three are answering.
 var _in_group_scene: bool = false
 
+## Animation state, filled in on the first physics frame from whatever model
+## Main parented under this body. All of it stays empty for the placeholder
+## capsule and for models that ship without animations, in which case every
+## animation call below quietly does nothing.
+var _anim: AnimationPlayer = null
+var _anim_idle: String = ""
+var _anim_walk: String = ""
+var _anim_playing: String = ""
+var _anim_checked: bool = false
+
 
 func _ready() -> void:
 	add_to_group("npc_characters")
@@ -136,6 +146,8 @@ func begin_travel(waypoints: Array, dest_room: String) -> void:
 
 
 func _physics_process(delta: float) -> void:
+	_ensure_animation()
+
 	if not is_on_floor():
 		velocity.y -= GRAVITY * delta
 	else:
@@ -148,6 +160,7 @@ func _physics_process(delta: float) -> void:
 		velocity.x = 0.0
 		velocity.z = 0.0
 		move_and_slide()
+		_play_animation(_anim_idle)
 		return
 
 	var desired := Vector3.ZERO
@@ -169,6 +182,7 @@ func _physics_process(delta: float) -> void:
 		velocity.z = move_toward(velocity.z, 0.0, SPEED)
 
 	move_and_slide()
+	_update_animation()
 
 
 ## Steers toward the next waypoint on _path, popping waypoints as they're
@@ -265,3 +279,56 @@ func _separation_force() -> Vector3:
 		if dist > 0.001 and dist < SEPARATION_RADIUS:
 			push += offset.normalized() * (SEPARATION_RADIUS - dist) * SEPARATION_STRENGTH
 	return push
+
+
+# --------------------------------------------------------------- animation --
+# Only does anything once a real model has been dropped into
+# Models/Suspects/<character_id>/ AND that model carries animation clips. The
+# placeholder capsule, and the Quaternius base characters (which ship with no
+# animations at all), leave _anim null and fall through every call untouched.
+
+## Finds the model's AnimationPlayer once, on the first physics frame rather
+## than in _ready(): Main adds this body to the tree - which fires _ready -
+## before it parents the model underneath, so at _ready time there is nothing
+## to find yet.
+func _ensure_animation() -> void:
+	if _anim_checked:
+		return
+	_anim_checked = true
+
+	_anim = SuspectModel.find_animation_player(self)
+	if _anim == null:
+		return
+
+	_anim_idle = SuspectModel.pick_animation(_anim, SuspectModel.IDLE_ANIMATIONS)
+	_anim_walk = SuspectModel.pick_animation(_anim, SuspectModel.WALK_ANIMATIONS)
+
+	# Imported clips are not always flagged as looping, and a walk cycle that
+	# plays once and freezes looks far more broken than one that never starts.
+	for clip_name in [_anim_idle, _anim_walk]:
+		if clip_name == "":
+			continue
+		var clip := _anim.get_animation(clip_name)
+		if clip != null and clip.loop_mode == Animation.LOOP_NONE:
+			clip.loop_mode = Animation.LOOP_LINEAR
+
+
+## Picks idle vs walk from how fast the body actually ended up moving, rather
+## than from `state` or the desired direction, so a suspect who is
+## decelerating, wedged against a wall, or being shoved around by separation
+## steering doesn't keep playing a walk cycle while standing still.
+func _update_animation() -> void:
+	if _anim == null:
+		return
+	var ground_speed := Vector2(velocity.x, velocity.z).length()
+	_play_animation(_anim_walk if ground_speed > 0.2 else _anim_idle)
+
+
+## Cross-fades to `clip_name` unless it is already the one playing. A blank
+## name means this model has no clip for that state, in which case whatever is
+## already playing is left alone rather than snapping back to rest pose.
+func _play_animation(clip_name: String) -> void:
+	if _anim == null or clip_name == "" or clip_name == _anim_playing:
+		return
+	_anim_playing = clip_name
+	_anim.play(clip_name, 0.2)

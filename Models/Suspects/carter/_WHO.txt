@@ -1,0 +1,7 @@
+Samuel "Sam" Carter
+Job: Private Investigator
+
+Drop ONE model file in this folder (.blend, .glb, .gltf or .fbx).
+The filename does not matter - the game picks up whatever is here.
+
+Suggested from your Quaternius pack: Casual3_Male.blend
