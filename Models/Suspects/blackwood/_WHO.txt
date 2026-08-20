@@ -1,0 +1,7 @@
+Dr. Evelyn Blackwood
+Job: Forensic Pathologist
+
+Drop ONE model file in this folder (.blend, .glb, .gltf or .fbx).
+The filename does not matter - the game picks up whatever is here.
+
+Suggested from your Quaternius pack: Doctor_Female_Young.blend

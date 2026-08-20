@@ -5,6 +5,10 @@ extends Node3D
 # the front door call into (via the "main_controller" group) to open dialogue
 # / accusation panels.
 
+# By path rather than by class_name, so a fresh clone can't hit the global
+# class scan-order race - see the header of SuspectModel.gd.
+const SuspectModel = preload("res://Scripts/SuspectModel.gd")
+
 const CELL := 12.0
 const PITCH := 13.0
 const WALL_H := 3.0
@@ -723,16 +727,15 @@ func _spawn_npcs() -> void:
 		npc.position = Vector3(center.x + offset.x, 0, center.z + offset.z)
 		npc_nodes[c["id"]] = npc
 
-		var mesh := MeshInstance3D.new()
-		var cap := CapsuleMesh.new()
-		cap.height = 1.8
-		cap.radius = 0.4
-		mesh.mesh = cap
-		mesh.position.y = 0.9
-		var mat := StandardMaterial3D.new()
-		mat.albedo_color = NPC_COLORS.get(c["id"], Color.WHITE)
-		mesh.material_override = mat
-		npc.add_child(mesh)
+		# The body is whatever model has been dropped into
+		# Models/Suspects/<id>/, falling back to the colored capsule this used to
+		# build inline whenever that folder is still empty - so the cast can be
+		# moved over to real models one suspect at a time without the game caring
+		# how far through that you are. See Models/Suspects/README.md.
+		var visual := SuspectModel.build_visual(
+			String(c["id"]), NPC_COLORS.get(c["id"], Color.WHITE)
+		)
+		npc.add_child(visual)
 
 		var coll := CollisionShape3D.new()
 		var cshape := CapsuleShape3D.new()
