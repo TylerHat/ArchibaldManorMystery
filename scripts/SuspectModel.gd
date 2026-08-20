@@ -38,6 +38,13 @@ const MODEL_EXTENSIONS := [
 const BODY_HEIGHT := 1.8
 const BODY_RADIUS := 0.4
 
+## Config keys starting with this recolor the material of the same name, e.g.
+## `color_skin="#e8c19a"` retints every surface whose material is called Skin.
+## Material names differ between models in the pack - Casual* use Shirt/Pants,
+## Suit* use Black/Details, the Wizard uses Clothes/Gold - so this matches on
+## whatever the model actually has rather than a fixed set of slots.
+const COLOR_PREFIX := "color_"
+
 ## Clip names looked for inside an imported model, best match first. Matching
 ## ignores case and any "Armature|" style prefix, so "Armature|walk_a" here
 ## matches "Walk_A" below.
@@ -110,7 +117,10 @@ static func build_visual(character_id: String, fallback_color: Color) -> Node3D:
 		return _build_capsule(fallback_color)
 
 	model.name = "Model"
-	_apply_tuning(model, character_id)
+	var cfg := ConfigFile.new()
+	var has_cfg := cfg.load(CONFIG_PATH) == OK
+	_apply_tuning(model, cfg, has_cfg, character_id)
+	_apply_recolor(model, cfg, has_cfg, character_id)
 	return model
 
 
@@ -169,10 +179,9 @@ static func _build_capsule(color: Color) -> Node3D:
 ## Applies suspect_models.cfg to a freshly instantiated model. With no config
 ## file present every value falls back to a sensible default, which is why
 ## dropping a .blend in and doing nothing else works.
-static func _apply_tuning(model: Node3D, character_id: String) -> void:
-	var cfg := ConfigFile.new()
-	var has_cfg := cfg.load(CONFIG_PATH) == OK
-
+static func _apply_tuning(
+	model: Node3D, cfg: ConfigFile, has_cfg: bool, character_id: String
+) -> void:
 	var auto_fit := bool(_cfg_value(cfg, has_cfg, character_id, "auto_fit_height", true))
 	var scale_mult := float(_cfg_value(cfg, has_cfg, character_id, "scale", 1.0))
 	var y_offset := float(_cfg_value(cfg, has_cfg, character_id, "y_offset", 0.0))
@@ -237,3 +246,68 @@ static func _collect_bounds(node: Node, xform: Transform3D, acc: Dictionary) -> 
 		if child is Node3D:
 			next = xform * (child as Node3D).transform
 		_collect_bounds(child, next, acc)
+
+
+# ----------------------------------------------------------------- recolor --
+# Every character in the pack ships with its Skin material set to #1f1f1f, so
+# heads and hands render as black silhouettes. Rather than editing twelve .blend
+# files, surfaces are retinted here at spawn from suspect_models.cfg.
+
+## Applies every `color_<material>` key for this suspect, [default] first so a
+## per-suspect section overrides it. Does nothing when the config names no
+## colors, which keeps the model exactly as the artist authored it.
+static func _apply_recolor(
+	model: Node3D, cfg: ConfigFile, has_cfg: bool, character_id: String
+) -> void:
+	if not has_cfg:
+		return
+
+	var wanted := {}
+	for section in ["default", character_id]:
+		if not cfg.has_section(section):
+			continue
+		for key in cfg.get_section_keys(section):
+			if key.begins_with(COLOR_PREFIX):
+				wanted[key.substr(COLOR_PREFIX.length()).to_lower()] = cfg.get_value(section, key)
+
+	if not wanted.is_empty():
+		_recolor_node(model, wanted)
+
+
+## Retints matching surfaces via set_surface_override_material() on a DUPLICATE
+## of the material. Editing the imported material in place would write through
+## to the shared resource and repaint every other suspect using the same .blend.
+static func _recolor_node(node: Node, wanted: Dictionary) -> void:
+	if node is MeshInstance3D:
+		var mi := node as MeshInstance3D
+		var mesh := mi.mesh
+		if mesh != null:
+			for i in mesh.get_surface_count():
+				var current := mi.get_active_material(i)
+				if current == null:
+					continue
+				var key := current.resource_name.to_lower()
+				if not wanted.has(key):
+					continue
+				var dup := current.duplicate() as BaseMaterial3D
+				if dup == null:
+					continue # a ShaderMaterial has no albedo_color to set
+				dup.albedo_color = _parse_color(wanted[key], dup.albedo_color)
+				mi.set_surface_override_material(i, dup)
+
+	for child in node.get_children():
+		_recolor_node(child, wanted)
+
+
+## Accepts either an HTML string ("#e8c19a") or a Color written straight into
+## the config. Anything unparseable warns and keeps the model's own color, so
+## one typo tints nothing rather than turning a suspect invisible.
+static func _parse_color(value: Variant, fallback: Color) -> Color:
+	if value is Color:
+		return value
+	if value is String:
+		var text := (value as String).strip_edges()
+		if Color.html_is_valid(text):
+			return Color.html(text)
+		push_warning("SuspectModel: '%s' is not a valid color - expected \"#rrggbb\"." % text)
+	return fallback

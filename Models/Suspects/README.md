@@ -68,18 +68,70 @@ next to this file:
 
 Changes to that file take effect on the next run — no reimport needed.
 
+## Colors and textures
+
+**These models have no textures, and cannot have any.** The meshes carry no UV
+layer at all, so there is nothing for a texture to map onto. All colour comes
+from flat materials - `Skin`, `Face`, `Hair` and a few clothing ones. That flat
+look is the art style, not a broken import.
+
+The `Texture.png` reference inside each .blend is a dead end: it points at
+`//<non-breaking-space>/Blender/DavidThorn/Library/Large/Texture.png`, a path
+from the original artist's machine, and no material actually uses it. Tracking
+down that PNG will not give you textured characters.
+
+### Recolouring
+
+Every character in the pack ships with `Skin` set to `#1f1f1f`, so out of the
+box their heads and hands are black silhouettes. `suspect_models.cfg` fixes
+that per suspect, and doubles as a way to tell them apart:
+
+```
+[thorne]
+color_skin="#c98c62"
+color_hair="#6b4a2a"
+```
+
+Any key `color_<material>` retints the material of that name, matched
+case-insensitively. An unknown name is ignored, so a stray key can't break a
+model, and a material you don't name keeps the colour the artist gave it.
+
+Material names differ per model - only these exist to be recoloured:
+
+| Model | Materials |
+|---|---|
+| `Casual_*`, `Casual2_*`, `Casual3_*` | Skin, Shirt, Pants, Belt, Face, Hair |
+| `Suit_Male`, `Suit_Female` | Skin, Black, Belt, Shirt, Details, Face, Hair |
+| `OldClassy_Male`, `OldClassy_Female` | Skin, Pants, Shirt, Detail, Belt, Face, Hat, Hair |
+| `Doctor_Female_Young` | Skin, Main, Black, Brown, Face, Hair |
+| `Wizard` | Skin, Clothes, Belt, Gold, Hat, Face, Hair |
+| `Worker_Female` | Skin, Shirt, Vest, Pants, Face, Hair |
+
+Two things worth knowing. `Face` is the eye whites, not the face - leave it
+alone. And `Skin` covers hands and bare legs as well as the head, so you can't
+give someone a white greasepaint face without whitening the rest of them.
+
+Colours are applied per instance via `set_surface_override_material()`, so two
+suspects sharing the same .blend get their own palettes with no bleed between
+them. Changes take effect on the next run - no reimport.
+
 ## Animation
 
 `NPCCharacter.gd` plays a `Walk` clip while a suspect is moving and an `Idle`
-clip while they're standing, if the model has them. Name matching ignores case
-and any `Armature|` prefix, and also accepts `Walk_A`, `Walking`, `Run`,
-`Idle_A`, `Stand`.
+clip while they're standing. Name matching ignores case and any `Armature|`
+prefix, and also accepts `Walk_A`, `Walking`, `Run`, `Idle_A`, `Stand`.
 
-The Quaternius base characters ship with **no animations**, so for now they'll
-stand in rest pose and slide. That's expected and nothing is broken. When you
-want them moving properly, grab the
-[Universal Animation Library](https://store.godotengine.org/asset/quaternius/universal-animation-library/)
-(CC0, same author, same rig) and merge the clips onto the model in Blender.
+Your pack ships **17 clips on every character**, so this works with no setup:
+
+```
+Death  Defeat  Idle  Jump  PickUp  Punch  RecieveHit  Roll  Run
+Run_Carry  Shoot_OneHanded  SitDown  StandUp  SwordSlash  Victory
+Walk  Walk_Carry
+```
+
+`Idle` and `Walk` are matched automatically. The others are there if you want
+them later — `SitDown`/`StandUp` for suspects in the lounge, `Victory` or
+`Defeat` for the accusation resolution.
 
 ## How it actually works
 
