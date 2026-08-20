@@ -257,8 +257,14 @@ static func _cfg_value(
 	return fallback
 
 
+## Public view of the bounds helper, for callers that need to size a collision
+## box or stand something on a surface. ManorDressing does both.
+static func model_bounds(model: Node3D) -> AABB:
+	return _model_bounds(model)
+
+
 ## Union of every mesh bounding box in the model, in the model root's own
-## space. Used only to work out how tall the thing actually is.
+## space. Used to work out how big the thing actually is.
 static func _model_bounds(model: Node3D) -> AABB:
 	var acc := {"found": false, "aabb": AABB()}
 	# Starts from IDENTITY rather than model.transform: this measures the model

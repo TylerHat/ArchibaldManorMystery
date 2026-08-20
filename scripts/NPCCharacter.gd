@@ -10,7 +10,11 @@ const SuspectModel = preload("res://Scripts/SuspectModel.gd")
 
 const SPEED := 2.2
 const ARRIVE_DIST := 0.35
-const WANDER_MARGIN := 2.0 # stay this far inside the room's outer walls
+# Raised from 2.0 when the manor got furnished. Suspects now keep to the open
+# middle of a room (within 2.5 of its centre) and the whole perimeter belongs
+# to the furniture, so nobody wanders into a bookcase and grinds against it -
+# these NPCs steer around each other but have no obstacle avoidance.
+const WANDER_MARGIN := 3.5 # stay this far inside the room's outer walls
 const ROOM_HALF := 6.0 # half of Main.CELL - keep in sync if CELL ever changes
 const WANDER_WAIT_MIN := 1.0
 const WANDER_WAIT_MAX := 3.5

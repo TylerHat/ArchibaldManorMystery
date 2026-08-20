@@ -1,0 +1,672 @@
+{
+ "scale": 0.5,
+ "rooms": {
+  "Library": [
+   {
+    "model": "Bookshelf",
+    "x": -3.0,
+    "z": 5.64,
+    "rot": 180
+   },
+   {
+    "model": "Shelf_Large",
+    "x": -4.55,
+    "z": 5.64,
+    "rot": 180
+   },
+   {
+    "model": "Bookshelf",
+    "x": 3.0,
+    "z": 5.64,
+    "rot": 180
+   },
+   {
+    "model": "Bookshelf",
+    "x": 4.29,
+    "z": 5.64,
+    "rot": 180
+   },
+   {
+    "model": "Chair_2",
+    "x": 5.62,
+    "z": 4.23,
+    "rot": -90
+   },
+   {
+    "model": "Table_RoundSmall",
+    "x": 5.34,
+    "z": 3.43,
+    "rot": -90
+   },
+   {
+    "model": "Chair_2",
+    "x": 5.62,
+    "z": 2.63,
+    "rot": -90
+   },
+   {
+    "model": "Light_Floor1",
+    "x": -5.76,
+    "z": 4.35,
+    "rot": 90
+   },
+   {
+    "model": "Houseplant_6",
+    "x": -5.57,
+    "z": 3.9,
+    "rot": 90
+   },
+   {
+    "model": "Carpet_1",
+    "x": 0.0,
+    "z": 0.0,
+    "rot": 0,
+    "solid": false
+   },
+   {
+    "model": "Light_Ceiling4",
+    "x": 0.0,
+    "z": 0.0,
+    "rot": 0,
+    "mount": "ceiling",
+    "solid": false
+   }
+  ],
+  "Study": [
+   {
+    "model": "Drawer_3",
+    "x": -3.46,
+    "z": 5.5,
+    "rot": 180
+   },
+   {
+    "model": "Bookshelf",
+    "x": 3.0,
+    "z": 5.64,
+    "rot": 180
+   },
+   {
+    "model": "Bookshelf",
+    "x": 4.29,
+    "z": 5.64,
+    "rot": 180
+   },
+   {
+    "model": "NightStand_1",
+    "x": 5.59,
+    "z": 4.19,
+    "rot": -90
+   },
+   {
+    "model": "Houseplant_8",
+    "x": 5.7,
+    "z": 3.69,
+    "rot": -90
+   },
+   {
+    "model": "Light_Floor3",
+    "x": -5.72,
+    "z": 4.33,
+    "rot": 90
+   },
+   {
+    "model": "Chair_1",
+    "x": -5.62,
+    "z": 3.91,
+    "rot": 90
+   },
+   {
+    "model": "Light_Desk",
+    "x": -3.6,
+    "z": 4.5,
+    "rot": 180,
+    "mount": "table",
+    "solid": false,
+    "y": 0.79
+   },
+   {
+    "model": "Carpet_Round",
+    "x": 0.0,
+    "z": 0.0,
+    "rot": 0,
+    "solid": false
+   },
+   {
+    "model": "Light_Ceiling4",
+    "x": 0.0,
+    "z": 0.0,
+    "rot": 0,
+    "mount": "ceiling",
+    "solid": false
+   }
+  ],
+  "Dining Room": [
+   {
+    "model": "Table_RoundLarge",
+    "x": 3.55,
+    "z": 4.15,
+    "rot": 0,
+    "scale": 0.65
+   },
+   {
+    "model": "Chair_1",
+    "x": 3.55,
+    "z": 5.09,
+    "rot": 180
+   },
+   {
+    "model": "Chair_1",
+    "x": 3.55,
+    "z": 3.21,
+    "rot": 0
+   },
+   {
+    "model": "Chair_1",
+    "x": 2.05,
+    "z": 4.15,
+    "rot": 90
+   },
+   {
+    "model": "Chair_1",
+    "x": 5.05,
+    "z": 4.15,
+    "rot": -90
+   },
+   {
+    "model": "Plate_1",
+    "x": 3.55,
+    "z": 4.6,
+    "rot": 0,
+    "mount": "table",
+    "solid": false,
+    "y": 0.74
+   },
+   {
+    "model": "Plate_1",
+    "x": 3.55,
+    "z": 3.7,
+    "rot": 0,
+    "mount": "table",
+    "solid": false,
+    "y": 0.74
+   },
+   {
+    "model": "Fork",
+    "x": 3.2,
+    "z": 4.6,
+    "rot": 90,
+    "mount": "table",
+    "solid": false,
+    "y": 0.74
+   },
+   {
+    "model": "Knife",
+    "x": 3.9,
+    "z": 4.6,
+    "rot": 90,
+    "mount": "table",
+    "solid": false,
+    "y": 0.74
+   },
+   {
+    "model": "Drawer_1",
+    "x": -3.12,
+    "z": 5.55,
+    "rot": 180
+   },
+   {
+    "model": "Houseplant_7",
+    "x": -5.53,
+    "z": 4.13,
+    "rot": 90
+   },
+   {
+    "model": "Drawer_1",
+    "x": -5.55,
+    "z": 3.02,
+    "rot": 90
+   },
+   {
+    "model": "Curtains_Double",
+    "x": -4.3,
+    "z": 5.65,
+    "rot": 180,
+    "mount": "wall",
+    "solid": false
+   },
+   {
+    "model": "Carpet_2",
+    "x": 3.55,
+    "z": 4.15,
+    "rot": 0,
+    "solid": false
+   },
+   {
+    "model": "Light_Chandelier",
+    "x": 3.55,
+    "z": 4.15,
+    "rot": 0,
+    "mount": "ceiling",
+    "solid": false
+   }
+  ],
+  "Kitchen": [
+   {
+    "model": "Kitchen_Cabinet1",
+    "x": -2.68,
+    "z": 5.56,
+    "rot": 180
+   },
+   {
+    "model": "Kitchen_Sink",
+    "x": -3.31,
+    "z": 5.55,
+    "rot": 180
+   },
+   {
+    "model": "Kitchen_3Drawers",
+    "x": -3.94,
+    "z": 5.55,
+    "rot": 180
+   },
+   {
+    "model": "Kitchen_Oven",
+    "x": 2.68,
+    "z": 5.55,
+    "rot": 180
+   },
+   {
+    "model": "Kitchen_Cabinet2",
+    "x": 3.31,
+    "z": 5.56,
+    "rot": 180
+   },
+   {
+    "model": "Kitchen_Fridge",
+    "x": 4.01,
+    "z": 5.5,
+    "rot": 180
+   },
+   {
+    "model": "Kitchen_CabinetSmall",
+    "x": -5.56,
+    "z": 4.21,
+    "rot": 90
+   },
+   {
+    "model": "Trashcan_Small1",
+    "x": -5.75,
+    "z": 3.74,
+    "rot": 90
+   },
+   {
+    "model": "Stool",
+    "x": 5.65,
+    "z": 4.26,
+    "rot": -90
+   },
+   {
+    "model": "Stool",
+    "x": 5.65,
+    "z": 3.79,
+    "rot": -90
+   },
+   {
+    "model": "Light_Ceiling4",
+    "x": 0.0,
+    "z": 0.0,
+    "rot": 0,
+    "mount": "ceiling",
+    "solid": false
+   }
+  ],
+  "Lounge": [
+   {
+    "model": "Fireplace",
+    "x": -3.24,
+    "z": 5.54,
+    "rot": 180
+   },
+   {
+    "model": "Couch_Small2",
+    "x": 2.95,
+    "z": 5.33,
+    "rot": 180
+   },
+   {
+    "model": "Table_RoundSmall",
+    "x": 4.09,
+    "z": 5.34,
+    "rot": 180
+   },
+   {
+    "model": "NightStand_1",
+    "x": 4.94,
+    "z": 5.59,
+    "rot": 180
+   },
+   {
+    "model": "Couch_Medium1",
+    "x": 5.28,
+    "z": 3.25,
+    "rot": -90
+   },
+   {
+    "model": "Couch_Small1",
+    "x": -5.28,
+    "z": 3.7,
+    "rot": 90
+   },
+   {
+    "model": "Light_Floor1",
+    "x": -5.76,
+    "z": 2.79,
+    "rot": 90
+   },
+   {
+    "model": "Carpet_Round",
+    "x": 0.0,
+    "z": 0.0,
+    "rot": 0,
+    "solid": false
+   },
+   {
+    "model": "Light_Ceiling4",
+    "x": 0.0,
+    "z": 0.0,
+    "rot": 0,
+    "mount": "ceiling",
+    "solid": false
+   }
+  ],
+  "Ballroom": [
+   {
+    "model": "Column_Round2",
+    "x": -4.7,
+    "z": 4.7,
+    "rot": 0
+   },
+   {
+    "model": "Column_Round2",
+    "x": 4.7,
+    "z": 4.7,
+    "rot": 0
+   },
+   {
+    "model": "Curtains_Double",
+    "x": -3.5,
+    "z": 5.65,
+    "rot": 180,
+    "mount": "wall",
+    "solid": false
+   },
+   {
+    "model": "Curtains_Double",
+    "x": 3.5,
+    "z": 5.65,
+    "rot": 180,
+    "mount": "wall",
+    "solid": false
+   },
+   {
+    "model": "Houseplant_6",
+    "x": -2.68,
+    "z": 5.57,
+    "rot": 180
+   },
+   {
+    "model": "Houseplant_6",
+    "x": 2.68,
+    "z": 5.57,
+    "rot": 180
+   },
+   {
+    "model": "Couch_Small2",
+    "x": -5.33,
+    "z": 2.75,
+    "rot": 90
+   },
+   {
+    "model": "Couch_Small2",
+    "x": 5.33,
+    "z": 2.75,
+    "rot": -90
+   },
+   {
+    "model": "Light_Chandelier",
+    "x": -2.8,
+    "z": 0.0,
+    "rot": 0,
+    "mount": "ceiling",
+    "solid": false
+   },
+   {
+    "model": "Light_Chandelier",
+    "x": 2.8,
+    "z": 0.0,
+    "rot": 0,
+    "mount": "ceiling",
+    "solid": false
+   }
+  ],
+  "Conservatory": [
+   {
+    "model": "Houseplant_7",
+    "x": -2.72,
+    "z": 5.53,
+    "rot": 180
+   },
+   {
+    "model": "Houseplant_6",
+    "x": -3.39,
+    "z": 5.57,
+    "rot": 180
+   },
+   {
+    "model": "Houseplant_7",
+    "x": 2.72,
+    "z": 5.53,
+    "rot": 180
+   },
+   {
+    "model": "Houseplant_6",
+    "x": 3.39,
+    "z": 5.57,
+    "rot": 180
+   },
+   {
+    "model": "Houseplant_8",
+    "x": -5.7,
+    "z": 4.3,
+    "rot": 90
+   },
+   {
+    "model": "Chair_3",
+    "x": -5.62,
+    "z": 3.85,
+    "rot": 90
+   },
+   {
+    "model": "Houseplant_3",
+    "x": -5.75,
+    "z": 3.45,
+    "rot": 90
+   },
+   {
+    "model": "Houseplant_8",
+    "x": 5.7,
+    "z": 4.3,
+    "rot": -90
+   },
+   {
+    "model": "Chair_3",
+    "x": 5.62,
+    "z": 3.85,
+    "rot": -90
+   },
+   {
+    "model": "Houseplant_4",
+    "x": 5.75,
+    "z": 3.45,
+    "rot": -90
+   },
+   {
+    "model": "Window_Large1",
+    "x": 3.6,
+    "z": 5.7,
+    "rot": 180,
+    "mount": "wall",
+    "solid": false,
+    "y": 1.35
+   },
+   {
+    "model": "Carpet_Round",
+    "x": 0.0,
+    "z": 0.0,
+    "rot": 0,
+    "solid": false
+   },
+   {
+    "model": "Light_Ceiling4",
+    "x": 0.0,
+    "z": 0.0,
+    "rot": 0,
+    "mount": "ceiling",
+    "solid": false
+   }
+  ],
+  "Billiard Room": [
+   {
+    "model": "Table_RoundLarge",
+    "x": -3.5,
+    "z": 4.15,
+    "rot": 0,
+    "scale": 0.6
+   },
+   {
+    "model": "Chair_1",
+    "x": -3.5,
+    "z": 5.04,
+    "rot": 180
+   },
+   {
+    "model": "Chair_1",
+    "x": -3.5,
+    "z": 3.26,
+    "rot": 0
+   },
+   {
+    "model": "Couch_Small2",
+    "x": 2.95,
+    "z": 5.33,
+    "rot": 180
+   },
+   {
+    "model": "Houseplant_1",
+    "x": 3.8,
+    "z": 5.66,
+    "rot": 180
+   },
+   {
+    "model": "Stool",
+    "x": 4.29,
+    "z": 5.65,
+    "rot": 180
+   },
+   {
+    "model": "Drawer_1",
+    "x": 5.55,
+    "z": 3.73,
+    "rot": -90
+   },
+   {
+    "model": "Light_Floor3",
+    "x": 5.72,
+    "z": 2.8,
+    "rot": -90
+   },
+   {
+    "model": "Window_Round1",
+    "x": 5.7,
+    "z": 4.2,
+    "rot": -90,
+    "mount": "wall",
+    "solid": false,
+    "y": 1.45
+   },
+   {
+    "model": "Light_Ceiling4",
+    "x": 0.0,
+    "z": 0.0,
+    "rot": 0,
+    "mount": "ceiling",
+    "solid": false
+   }
+  ],
+  "Hall": [
+   {
+    "model": "Column_SquareSmall",
+    "x": -4.6,
+    "z": 4.6,
+    "rot": 0
+   },
+   {
+    "model": "Column_SquareSmall",
+    "x": 4.6,
+    "z": 4.6,
+    "rot": 0
+   },
+   {
+    "model": "Houseplant_6",
+    "x": -5.57,
+    "z": 3.01,
+    "rot": 90
+   },
+   {
+    "model": "Houseplant_6",
+    "x": 5.57,
+    "z": 3.01,
+    "rot": -90
+   },
+   {
+    "model": "Drawer_1",
+    "x": -3.22,
+    "z": 5.55,
+    "rot": 180
+   },
+   {
+    "model": "Houseplant_7",
+    "x": -4.34,
+    "z": 5.53,
+    "rot": 180
+   },
+   {
+    "model": "Drawer_1",
+    "x": 3.22,
+    "z": 5.55,
+    "rot": 180
+   },
+   {
+    "model": "Houseplant_7",
+    "x": 4.34,
+    "z": 5.53,
+    "rot": 180
+   },
+   {
+    "model": "Carpet_Round",
+    "x": 0.0,
+    "z": 0.0,
+    "rot": 0,
+    "solid": false
+   },
+   {
+    "model": "Light_Chandelier",
+    "x": 0.0,
+    "z": 0.0,
+    "rot": 0,
+    "mount": "ceiling",
+    "solid": false
+   }
+  ]
+ }
+}

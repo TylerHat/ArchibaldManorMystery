@@ -176,6 +176,10 @@ var examine_title_label: Label
 var examine_body: RichTextLabel
 var crime_scene: Node3D
 
+## Background furniture, built by ManorDressing from Models/Furniture. Held so
+## a restart can free the whole lot in one call, same as crime_scene.
+var furniture: Node3D
+
 var name_regexes: Dictionary = {} # character_id -> compiled RegEx matching that suspect's name variants
 
 var selection_layer: CanvasLayer
@@ -219,6 +223,10 @@ func _start_game(selected_ids: Array) -> void:
 	_build_name_regexes()
 	_build_world()
 	_build_mansion()
+	# Furniture before the suspects and the body: it also needs room_centers, and
+	# building it first means anything spawned afterwards lands on top of it
+	# rather than inside it.
+	furniture = load("res://Scripts/ManorDressing.gd").build(self, rooms_node)
 	_spawn_npcs()
 	# After the mansion, since it needs room_centers to place anything.
 	crime_scene = load("res://Scripts/CrimeScene.gd").build(self, rooms_node)
