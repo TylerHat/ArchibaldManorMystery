@@ -1,3 +1,22 @@
+> # SUPERSEDED
+>
+> **Do not follow Part 4 of this document.** Hand-placing the 37 walls
+> reproduces, node by node, geometry that `Main.gd` already generated
+> correctly from the `GRID` constant.
+>
+> Use `Scripts/ManorBuilder.gd` instead. It is a `@tool` script, so the manor
+> is generated live in the editor viewport from a `FLOORS` spec, the layout
+> stays editable, and the shell collapses to 3 draw calls instead of ~47. Its
+> output was diffed against the old `_build_wall_side()` box by box and is
+> identical.
+>
+> See **`MANOR_BUILDER.md`** for setup and the `Main.gd` patch.
+>
+> Kept for reference only: the dimension tables and the wall-type breakdown in
+> Part 3 are still accurate and useful.
+
+---
+
 # Building Archibald Manor by hand in the Godot editor
 
 A step-by-step guide to replacing the code-generated mansion with real nodes
