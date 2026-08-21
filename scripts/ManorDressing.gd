@@ -21,10 +21,19 @@ extends Node
 const SuspectModel = preload("res://Scripts/SuspectModel.gd")
 
 const LAYOUT_PATH := "res://Models/Furniture/furniture.json"
-const MODEL_DIR := "res://Models/Furniture"
+## Searched in order, first match wins. Extra/ is where a second pack lands, so
+## a new download can be dropped in whole without renaming anything - the only
+## consequence of a name clash is that the original pack keeps the name.
+const MODEL_DIRS := [
+	"res://Models/Furniture",
+	"res://Models/Furniture/Extra",
+]
 
-## Main.WALL_H is 3.0; hang ceiling fittings just under it.
-const CEILING_Y := 2.55
+## How far above a room's OWN floor a ceiling fitting hangs. Main.WALL_H is 3.0,
+## so this leaves a chandelier just under the ceiling. Relative rather than
+## absolute, so an upstairs room hangs its lights from its own ceiling rather
+## than from the ground floor's.
+const CEILING_DROP := 2.55
 
 ## Flat floor props (rugs) are modelled with their base at exactly y=0, which
 ## is also exactly where the floor's top surface sits - so the two planes
@@ -37,11 +46,22 @@ const FLOOR_DECAL_LIFT := 0.012
 ## the .blend files without anything here changing.
 const MODEL_EXTENSIONS := ["blend", "glb", "gltf", "fbx"]
 
+## Longest edge below which a piece stops casting a shadow. A fork, a plate or a
+## paperweight contributes nothing legible to the shadow map but still costs a
+## full render of its geometry from the light's point of view, once per light
+## that reaches it. Raise this to cut more; drop it to 0.0 to shadow everything.
+const SHADOW_MIN_SIZE := 0.35
+
 
 ## Builds every piece listed in furniture.json. Never throws on bad data: a
 ## missing model or an unknown room name warns and is skipped, so a typo costs
 ## one chair rather than the whole manor.
-static func build(main: Node3D, parent: Node3D) -> Node3D:
+## `centres` maps every room name in the building - both storeys - to its world
+## centre, with y at that room's floor level. Passing it in rather than reading
+## main.room_centers is what lets the upstairs be furnished at all: those rooms
+## are deliberately kept out of room_centers so the case generator can never see
+## them, but the furniture layout addresses them exactly like any other room.
+static func build(main: Node3D, parent: Node3D, centres: Dictionary) -> Node3D:
 	var root := Node3D.new()
 	root.name = "Furniture"
 	parent.add_child(root)
@@ -56,12 +76,22 @@ static func build(main: Node3D, parent: Node3D) -> Node3D:
 	var skipped := 0
 
 	for room_name in rooms:
-		if not main.room_centers.has(room_name):
+		if not centres.has(room_name):
 			push_warning("ManorDressing: no room called '%s' in the manor." % room_name)
 			continue
-		var centre: Vector3 = main.room_centers[room_name]
+		var centre: Vector3 = centres[room_name]
+
+		# One node per room, named exactly as the room is. Main hides the ones the
+		# player cannot currently see into, which is only possible if a room's
+		# pieces - and its lamps - sit under a single switch. Hiding a node never
+		# touches its CollisionShape3D children, so an unseen room is still solid
+		# to walk into.
+		var room_root := Node3D.new()
+		room_root.name = String(room_name)
+		root.add_child(room_root)
+
 		for entry in rooms[room_name]:
-			if _place(root, centre, entry, default_scale):
+			if _place(room_root, centre, entry, default_scale, _interior_half(main)):
 				placed += 1
 			else:
 				skipped += 1
@@ -75,7 +105,17 @@ static func build(main: Node3D, parent: Node3D) -> Node3D:
 
 # ------------------------------------------------------------------ pieces --
 
-static func _place(root: Node3D, centre: Vector3, entry: Dictionary, default_scale: float) -> bool:
+## Distance from a room's centre to the INNER face of its walls. Walls sit on
+## the room boundary at WALL_SPAN/2 and are WALL_T thick, so the face a piece of
+## furniture can actually touch is half a wall thickness inside that. Read off
+## Main rather than duplicated, because getting it wrong is exactly how furniture
+## ends up buried in a wall.
+static func _interior_half(main: Node3D) -> float:
+	return float(main.WALL_SPAN) / 2.0 - float(main.WALL_T) / 2.0
+
+
+static func _place(root: Node3D, centre: Vector3, entry: Dictionary, default_scale: float,
+		interior_half: float) -> bool:
 	var model_name := String(entry.get("model", ""))
 	var scene := _load_model(model_name)
 	if scene == null:
@@ -94,6 +134,20 @@ static func _place(root: Node3D, centre: Vector3, entry: Dictionary, default_sca
 	# turned to face, rather than along the world X axis. That is almost always
 	# what you want, and it is why the stretch is applied before the rotation.
 	var uniform := float(entry.get("scale", default_scale))
+
+	# "fit_y": 0.65 means "stand this 0.65m tall", whatever units the artist
+	# worked in. Height is the one dimension that is reliably known for a piece
+	# of furniture, which makes it the right handle for a pack whose scene scale
+	# you have not measured. Bounds are taken before any scaling, because
+	# model_bounds() deliberately measures in the model's own space.
+	var fit_y := float(entry.get("fit_y", 0.0))
+	if fit_y > 0.0:
+		var raw: AABB = SuspectModel.model_bounds(model)
+		if raw.size.y > 0.0001:
+			uniform = fit_y / raw.size.y
+		else:
+			push_warning("ManorDressing: '%s' is flat, so fit_y cannot size it." % model_name)
+
 	var stretch = entry.get("stretch", null)
 	if stretch is Array and (stretch as Array).size() == 3:
 		model.scale = Vector3(uniform * float(stretch[0]),
@@ -107,15 +161,62 @@ static func _place(root: Node3D, centre: Vector3, entry: Dictionary, default_sca
 	# still lands flat on the floor with a collision box that matches it.
 	var box: AABB = model.transform * SuspectModel.model_bounds(model)
 
+	# Anything this small is not readable as a silhouette on the floor anyway.
+	# Opt a specific piece back in with "shadow": true in furniture.json.
+	if not bool(entry.get("shadow", false)):
+		if maxf(box.size.x, maxf(box.size.y, box.size.z)) < SHADOW_MIN_SIZE:
+			_disable_shadows(model)
+
+	# Everything vertical is measured from the room's OWN floor, so the same
+	# layout entry places a chair correctly whether the room is at ground level
+	# or one storey up.
+	var floor_y := centre.y
 	var pos := Vector3(centre.x + float(entry.get("x", 0.0)), 0.0,
 			centre.z + float(entry.get("z", 0.0)))
+
+	# "anchor" opts a piece into placement by its MEASURED bounds instead of by
+	# its origin, which is the same trick the y line below already uses. Without
+	# it, x and z position the model's origin - and an artist can put that
+	# anywhere. In the pack under Extra/, BookCaseLarge's origin sits 0.4 off its
+	# own centre and CoffeeTable2's is a metre and a half outside the mesh
+	# entirely, so origin placement buried one bookcase 1.28m inside a wall.
+	#
+	#   "anchor": "center"                x and z place the piece's own centre
+	#   "anchor": "north"|"south"|"east"|"west"
+	#                                     as above, and the named coordinate is
+	#                                     overridden so the piece's back face
+	#                                     lands exactly on that wall's inner face
+	#
+	# Deliberately opt-in. The ground-floor layout was hand-tuned against origin
+	# placement and half its models have off-centre origins too, so switching it
+	# wholesale would shove 145 pieces around.
+	var anchor := String(entry.get("anchor", ""))
+	if anchor != "":
+		var want_x := centre.x + float(entry.get("x", 0.0))
+		var want_z := centre.z + float(entry.get("z", 0.0))
+		match anchor:
+			"north":
+				want_z = centre.z - interior_half + box.size.z * 0.5
+			"south":
+				want_z = centre.z + interior_half - box.size.z * 0.5
+			"west":
+				want_x = centre.x - interior_half + box.size.x * 0.5
+			"east":
+				want_x = centre.x + interior_half - box.size.x * 0.5
+			"center":
+				pass
+			_:
+				push_warning("ManorDressing: '%s' has anchor \"%s\", which is not a side." % [model_name, anchor])
+		pos.x = want_x - (box.position.x + box.size.x * 0.5)
+		pos.z = want_z - (box.position.z + box.size.z * 0.5)
 	if String(entry.get("mount", "floor")) == "ceiling":
 		# Hang it from the ceiling by its top rather than standing it up.
-		pos.y = CEILING_Y - (box.position.y + box.size.y)
+		pos.y = floor_y + CEILING_DROP - (box.position.y + box.size.y)
 	else:
-		# "y" is where the BOTTOM of the piece goes: 0 for anything on the
-		# floor, table height for a plate, sill height for a window.
-		pos.y = float(entry.get("y", 0.0)) - box.position.y
+		# "y" is where the BOTTOM of the piece goes, above this room's floor: 0
+		# for anything standing on it, table height for a plate, sill height for
+		# a window.
+		pos.y = floor_y + float(entry.get("y", 0.0)) - box.position.y
 		if String(entry.get("mount", "floor")) == "floor" and box.size.y < 0.15:
 			pos.y += FLOOR_DECAL_LIFT
 
@@ -147,6 +248,16 @@ static func _place(root: Node3D, centre: Vector3, entry: Dictionary, default_sca
 		_add_light(root, pos + box.position + box.size * 0.5, light_cfg)
 
 	return true
+
+
+## Turns off shadow casting for every mesh under a piece. Visibility and
+## lighting are untouched - the piece still renders and is still lit, it just
+## stops being drawn again into every shadow map that reaches it.
+static func _disable_shadows(node: Node) -> void:
+	if node is GeometryInstance3D:
+		(node as GeometryInstance3D).cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	for child in node.get_children():
+		_disable_shadows(child)
 
 
 ## A light fixture is only geometry - it emits nothing by itself. This hangs a
@@ -193,11 +304,12 @@ static func _load_layout() -> Dictionary:
 static func _load_model(model_name: String) -> PackedScene:
 	if model_name == "":
 		return null
-	for ext in MODEL_EXTENSIONS:
-		var path := "%s/%s.%s" % [MODEL_DIR, model_name, ext]
-		if ResourceLoader.exists(path):
-			var res := load(path)
-			if res is PackedScene:
-				return res as PackedScene
-	push_warning("ManorDressing: no model file for '%s' in %s." % [model_name, MODEL_DIR])
+	for dir_path in MODEL_DIRS:
+		for ext in MODEL_EXTENSIONS:
+			var path := "%s/%s.%s" % [dir_path, model_name, ext]
+			if ResourceLoader.exists(path):
+				var res := load(path)
+				if res is PackedScene:
+					return res as PackedScene
+	push_warning("ManorDressing: no model file for '%s' in %s." % [model_name, ", ".join(PackedStringArray(MODEL_DIRS))])
 	return null

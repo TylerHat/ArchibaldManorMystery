@@ -15,6 +15,28 @@ const WALL_H := 3.0
 const WALL_T := 0.4
 const DOOR_W := 3.0
 
+## How far a wall runs along its own axis, and how far out from a room's centre
+## it sits. This is the corner-gap fix, and it is the same one ManorBuilder
+## already applies to the upper floor.
+##
+## Walls used to be CELL long (12) sitting at CELL/2, while rooms are spaced
+## PITCH apart (13). Every wall therefore stopped 1.0 short of the next one and
+## left a hole exactly where the corner should be, sixteen of them on this
+## floor. Measured by flood fill, the widest clear route from outside into a
+## room was 0.76m against a 0.80m player capsule: you could see straight out
+## through every corner, and only miss walking out by 4cm.
+##
+## At PITCH the walls sit on the room boundary instead, so each one butts its
+## neighbour end to end with neither gap nor overlap - not PITCH + WALL_T, which
+## also seals the corners but puts two same-facing coplanar quads in the same
+## place at every junction and makes the walls shimmer.
+##
+## Two things fall out of it. Rooms become symmetric, instead of 0.5 short on
+## their south and east sides and 0.5 long on the other two. And the doorway
+## waypoint get_room_travel_waypoints() computes - the midpoint between two room
+## centres - lands exactly in the opening rather than half a metre past it.
+const WALL_SPAN := PITCH
+
 # The Hall doubles as the meetup room: suspects ordered there gather for a
 # group confrontation.
 #
@@ -180,6 +202,28 @@ var crime_scene: Node3D
 ## a restart can free the whole lot in one call, same as crime_scene.
 var furniture: Node3D
 
+## The second storey, built by an instance of ManorBuilder configured to emit
+## level 1 only. Player-only space: none of these room names appear in GRID,
+## grid_pos, room_centers or CaseGenerator.GRID, which is precisely what keeps
+## every suspect, every schedule and every alibi downstairs without the case
+## generator needing to know the floor exists.
+var upper_floor: Node3D
+
+## Upstairs room name -> world centre, with y at that floor's level. Read by
+## _room_at() and handed to ManorDressing so the upstairs can be furnished.
+var upper_room_centers: Dictionary = {}
+
+## Upstairs room name -> Vector2i(row, col) on the upper floor's own grid.
+## Deliberately separate from grid_pos: sharing one dictionary would collide,
+## since the Stair Hall and the Hall occupy the same cell.
+var upper_grid_pos: Dictionary = {}
+
+## Ground-floor rooms that have an upstairs room directly above them. Those
+## rooms get no ceiling of their own: the upper floor's slab occupies exactly
+## the band Main's ceiling would have, so building both would put two coplanar
+## slabs in the same place and cap the stairwell into the bargain.
+var _roofed_by_upper: Dictionary = {}
+
 var name_regexes: Dictionary = {} # character_id -> compiled RegEx matching that suspect's name variants
 
 var selection_layer: CanvasLayer
@@ -220,13 +264,19 @@ func _ready() -> void:
 ## picked which suspects are in tonight - called from _on_start_pressed().
 func _start_game(selected_ids: Array) -> void:
 	GameManager.start_new_game(selected_ids)
+	# Re-read suspect_models.cfg from disk, so editing a colour and hitting Play
+	# Again shows the change without restarting the whole game.
+	SuspectModel.reset_config_cache()
 	_build_name_regexes()
 	_build_world()
+	# Before the mansion, because it decides which ground rooms skip their ceiling.
+	_build_upper_floor()
 	_build_mansion()
 	# Furniture before the suspects and the body: it also needs room_centers, and
 	# building it first means anything spawned afterwards lands on top of it
 	# rather than inside it.
-	furniture = load("res://Scripts/ManorDressing.gd").build(self, rooms_node)
+	furniture = load("res://Scripts/ManorDressing.gd").build(self, rooms_node, all_room_centers())
+	_index_furniture_rooms()
 	_spawn_npcs()
 	# After the mansion, since it needs room_centers to place anything.
 	crime_scene = load("res://Scripts/CrimeScene.gd").build(self, rooms_node)
@@ -542,6 +592,19 @@ func _unhandled_input(event: InputEvent) -> void:
 
 # ---------------------------------------------------------------- geometry --
 
+# The manor shell is about sixty boxes, and this used to mint a fresh BoxMesh,
+# StandardMaterial3D and BoxShape3D for every single one. The material was the
+# expensive part: forty-odd identical cream wall segments each carrying their
+# own material means forty-odd draw calls, because Godot can only batch geometry
+# that shares one. ManorBuilder learned this for the editor preview - its
+# _flush_individual() carries the same note - and these three caches are the
+# same fix on the runtime path. Keyed on the only things that vary, so the
+# result is pixel-identical.
+var _box_mesh_cache: Dictionary = {}
+var _box_material_cache: Dictionary = {}
+var _box_shape_cache: Dictionary = {}
+
+
 func add_solid_box(parent: Node3D, box_name: String, size: Vector3, pos: Vector3, color: Color) -> StaticBody3D:
 	var body := StaticBody3D.new()
 	body.name = box_name
@@ -549,21 +612,48 @@ func add_solid_box(parent: Node3D, box_name: String, size: Vector3, pos: Vector3
 	body.position = pos
 
 	var mesh_instance := MeshInstance3D.new()
-	var box_mesh := BoxMesh.new()
-	box_mesh.size = size
-	mesh_instance.mesh = box_mesh
-	var mat := StandardMaterial3D.new()
-	mat.albedo_color = color
-	mesh_instance.material_override = mat
+	mesh_instance.mesh = _shared_box_mesh(size)
+	mesh_instance.material_override = _shared_box_material(color)
 	body.add_child(mesh_instance)
 
 	var coll := CollisionShape3D.new()
-	var shape := BoxShape3D.new()
-	shape.size = size
-	coll.shape = shape
+	coll.shape = _shared_box_shape(size)
 	body.add_child(coll)
 
 	return body
+
+
+## One BoxMesh per distinct size. Shared, and never mutated after creation -
+## every caller here sets the size up front and then only moves the node.
+func _shared_box_mesh(size: Vector3) -> BoxMesh:
+	var key := "%.4f,%.4f,%.4f" % [size.x, size.y, size.z]
+	if not _box_mesh_cache.has(key):
+		var m := BoxMesh.new()
+		m.size = size
+		_box_mesh_cache[key] = m
+	return _box_mesh_cache[key]
+
+
+## One material per distinct colour. This is the one that actually buys the
+## draw calls back.
+func _shared_box_material(color: Color) -> StandardMaterial3D:
+	var key := color.to_html(true)
+	if not _box_material_cache.has(key):
+		var mat := StandardMaterial3D.new()
+		mat.albedo_color = color
+		_box_material_cache[key] = mat
+	return _box_material_cache[key]
+
+
+## One BoxShape3D per distinct size. Godot is happy for many bodies to share a
+## shape resource, and it saves the physics server rebuilding the same box.
+func _shared_box_shape(size: Vector3) -> BoxShape3D:
+	var key := "%.4f,%.4f,%.4f" % [size.x, size.y, size.z]
+	if not _box_shape_cache.has(key):
+		var sh := BoxShape3D.new()
+		sh.size = size
+		_box_shape_cache[key] = sh
+	return _box_shape_cache[key]
 
 
 func _build_world() -> void:
@@ -585,6 +675,12 @@ func _build_world() -> void:
 	light.rotation_degrees = Vector3(-55, -30, 0)
 	light.light_energy = 1.1
 	light.shadow_enabled = true
+	# The manor is 39m across and the ground plane is 60m, but the default shadow
+	# distance is 100m - so most of the shadow map's resolution was being spent on
+	# empty ground beyond the walls. Pulling it in sharpens the shadows that are
+	# actually on screen and drops two of the four cascade renders per frame.
+	light.directional_shadow_max_distance = 45.0
+	light.directional_shadow_mode = DirectionalLight3D.SHADOW_PARALLEL_2_SPLITS
 	add_child(light)
 
 	rooms_node = Node3D.new()
@@ -593,6 +689,63 @@ func _build_world() -> void:
 
 	# A large safety-net ground plane beneath everything.
 	add_solid_box(rooms_node, "Ground", Vector3(60, 0.2, 60), Vector3(0, -0.6, 0), Color(0.1, 0.1, 0.12))
+
+
+## Stands up the second storey. ManorBuilder already knows how to do all of
+## this - levels, void cells for the plus-shaped footprint, the stair flight,
+## the hole it cuts in the slab above, and now the railings round that hole -
+## so this hands it the job rather than reimplementing any of it here. Its
+## ground floor is indexed but not emitted, because Main still builds that.
+func _build_upper_floor() -> void:
+	upper_room_centers.clear()
+	upper_grid_pos.clear()
+	_roofed_by_upper.clear()
+
+	var builder_script := load("res://Scripts/ManorBuilder.gd")
+	if builder_script == null:
+		push_warning("Main: ManorBuilder.gd is missing - the manor stays one storey.")
+		return
+
+	# Deliberately untyped. Typed as Node3D the analyzer rejects every line below
+	# it, because build_ground_plane and friends are properties of the script, not
+	# of Node3D. Loaded by path rather than by class_name for the same reason
+	# SuspectModel is: a global class can lose the filesystem-scan race on a fresh
+	# clone, and a path cannot.
+	var builder = builder_script.new()
+	builder.name = "UpperFloor"
+	# Every export has to be set BEFORE the node enters the tree: _ready() calls
+	# rebuild() the moment it does.
+	builder.build_ground_plane = false   # Main already lays one, 60m square
+	builder.build_ceilings = true        # the top floor genuinely needs a roof
+	builder.build_room_volumes = false   # nothing reads them yet
+	builder.build_room_labels = true
+	builder.save_to_scene = false
+	rooms_node.add_child(builder)
+	upper_floor = builder
+
+	for rname in builder.room_centers.keys():
+		var name_str := String(rname)
+		if int(builder.room_level.get(name_str, 0)) <= 0:
+			continue  # its copy of the ground floor, which Main owns
+		upper_room_centers[name_str] = builder.room_centers[name_str]
+		upper_grid_pos[name_str] = builder.grid_pos[name_str]
+		# Same cell one level down is the room this one is sitting on.
+		var cell: Vector2i = builder.grid_pos[name_str]
+		if cell.x >= 0 and cell.x < GRID.size() and cell.y >= 0 and cell.y < GRID[cell.x].size():
+			_roofed_by_upper[String(GRID[cell.x][cell.y])] = true
+
+	print("[Upstairs] %d rooms; %d ground rooms now roofed by the floor above" % [
+		upper_room_centers.size(), _roofed_by_upper.size()])
+
+
+## Every room in the building, both storeys, keyed by name. Names are unique
+## across floors, so one flat dictionary is enough - which is what lets the
+## furniture layout address an upstairs room exactly like a downstairs one.
+func all_room_centers() -> Dictionary:
+	var out := room_centers.duplicate()
+	for rname in upper_room_centers.keys():
+		out[rname] = upper_room_centers[rname]
+	return out
 
 
 func _room_center(row: int, col: int) -> Vector3:
@@ -634,7 +787,11 @@ func _build_room(rname: String, center: Vector3, row: int, col: int) -> void:
 	# the walls. Darker than the floor because it never catches the directional
 	# light - once a room is roofed, everything inside is lit by the ambient term
 	# and by whatever fixtures ManorDressing hung from the ceiling.
-	add_solid_box(rooms_node, rname + "_Ceiling", Vector3(PITCH, 0.2, PITCH), Vector3(center.x, WALL_H + 0.1, center.z), color.darkened(0.45))
+	# ...unless there is a whole room up there instead. The upper floor's slab
+	# sits in exactly this band, so a ceiling here would be a second slab in the
+	# same place - z-fighting at best, and a lid over the stairwell at worst.
+	if not _roofed_by_upper.has(rname):
+		add_solid_box(rooms_node, rname + "_Ceiling", Vector3(PITCH, 0.2, PITCH), Vector3(center.x, WALL_H + 0.1, center.z), color.darkened(0.45))
 
 	# Each shared boundary between two rooms must only be built ONCE, by
 	# whichever room "owns" it - otherwise two offset wall segments end up
@@ -665,30 +822,32 @@ func _build_room(rname: String, center: Vector3, row: int, col: int) -> void:
 
 
 func _build_wall_side(rname: String, center: Vector3, row: int, col: int, dir: String) -> void:
-	var half := CELL / 2.0
+	# On the room boundary, not at CELL/2 - see WALL_SPAN.
+	var half := WALL_SPAN / 2.0
+	# Each half of a doorway wall runs from the opening out to the far end of the
+	# wall's span, so the two segments plus the DOOR_W gap add up to WALL_SPAN and
+	# the doorway stays centred on the room.
+	var seg := (WALL_SPAN - DOOR_W) / 2.0
+	var off := DOOR_W / 2.0 + seg / 2.0
 	if dir == "north" or dir == "south":
 		var has_n := _has_neighbor(row, col, dir)
 		var z: float = center.z + (-half if dir == "north" else half)
 		var is_front_door := rname == "Hall" and dir == "south" and not has_n
 		if has_n or is_front_door:
-			var seg := (CELL - DOOR_W) / 2.0
-			var off := DOOR_W / 2.0 + seg / 2.0
 			add_solid_box(rooms_node, rname + "_" + dir + "_a", Vector3(seg, WALL_H, WALL_T), Vector3(center.x - off, WALL_H / 2.0, z), WALL_COLOR)
 			add_solid_box(rooms_node, rname + "_" + dir + "_b", Vector3(seg, WALL_H, WALL_T), Vector3(center.x + off, WALL_H / 2.0, z), WALL_COLOR)
 			if is_front_door:
 				_build_front_door(Vector3(center.x, 0, z))
 		else:
-			add_solid_box(rooms_node, rname + "_" + dir, Vector3(CELL, WALL_H, WALL_T), Vector3(center.x, WALL_H / 2.0, z), WALL_COLOR)
+			add_solid_box(rooms_node, rname + "_" + dir, Vector3(WALL_SPAN, WALL_H, WALL_T), Vector3(center.x, WALL_H / 2.0, z), WALL_COLOR)
 	else:
 		var has_n2 := _has_neighbor(row, col, dir)
 		var x: float = center.x + (-half if dir == "west" else half)
 		if has_n2:
-			var seg2 := (CELL - DOOR_W) / 2.0
-			var off2 := DOOR_W / 2.0 + seg2 / 2.0
-			add_solid_box(rooms_node, rname + "_" + dir + "_a", Vector3(WALL_T, WALL_H, seg2), Vector3(x, WALL_H / 2.0, center.z - off2), WALL_COLOR)
-			add_solid_box(rooms_node, rname + "_" + dir + "_b", Vector3(WALL_T, WALL_H, seg2), Vector3(x, WALL_H / 2.0, center.z + off2), WALL_COLOR)
+			add_solid_box(rooms_node, rname + "_" + dir + "_a", Vector3(WALL_T, WALL_H, seg), Vector3(x, WALL_H / 2.0, center.z - off), WALL_COLOR)
+			add_solid_box(rooms_node, rname + "_" + dir + "_b", Vector3(WALL_T, WALL_H, seg), Vector3(x, WALL_H / 2.0, center.z + off), WALL_COLOR)
 		else:
-			add_solid_box(rooms_node, rname + "_" + dir, Vector3(WALL_T, WALL_H, CELL), Vector3(x, WALL_H / 2.0, center.z), WALL_COLOR)
+			add_solid_box(rooms_node, rname + "_" + dir, Vector3(WALL_T, WALL_H, WALL_SPAN), Vector3(x, WALL_H / 2.0, center.z), WALL_COLOR)
 
 
 func _build_front_door(pos: Vector3) -> void:
@@ -716,6 +875,26 @@ func _build_front_door(pos: Vector3) -> void:
 	door.add_child(coll)
 
 	front_door_node = door
+
+	# The door slab is 0.6 narrower and 0.3 shorter than the DOOR_W x WALL_H hole
+	# the wall left for it, so without a frame there is a 0.3 slot down each side
+	# and another over the top. Too narrow to walk through, wide enough to look
+	# straight out of the manor - which is what a flood fill at eye height finds
+	# once the corner gaps are sealed and this is the only opening left.
+	#
+	# Two jambs and a lintel in the wall colour. Deliberately butted rather than
+	# overlapped: the jambs run full height and the lintel spans only the door's
+	# own width, so no two same-facing faces ever share a plane.
+	var door_w := box.size.x
+	var door_h := box.size.y
+	var jamb := (DOOR_W - door_w) / 2.0
+	var head := WALL_H - door_h
+	add_solid_box(rooms_node, "FrontDoor_JambW", Vector3(jamb, WALL_H, WALL_T),
+			pos + Vector3(-(door_w + jamb) / 2.0, WALL_H / 2.0, 0.0), WALL_COLOR)
+	add_solid_box(rooms_node, "FrontDoor_JambE", Vector3(jamb, WALL_H, WALL_T),
+			pos + Vector3((door_w + jamb) / 2.0, WALL_H / 2.0, 0.0), WALL_COLOR)
+	add_solid_box(rooms_node, "FrontDoor_Head", Vector3(door_w, head, WALL_T),
+			pos + Vector3(0.0, door_h + head / 2.0, 0.0), WALL_COLOR)
 
 
 # -------------------------------------------------------------- characters --
@@ -776,6 +955,100 @@ func _spawn_npcs() -> void:
 		label.outline_size = 10
 		label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
 		npc.add_child(label)
+
+
+# ------------------------------------------------------ furniture culling --
+# The manor is nine walled rooms and every doorway is centred on its wall, so
+# from any room you can see into that room and the (up to four) rooms it has
+# doorways to, and nothing else - there is no diagonal sightline. Furniture in
+# the rest of the house can stop rendering entirely.
+#
+# Visibility does not touch physics: a hidden room's StaticBody3D pieces are
+# still solid, so nothing changes about where the player can walk. The room's
+# lamps ride along under the same switch, which is the larger saving of the two
+# - an OmniLight3D you cannot see is still in the light loop until it is hidden.
+
+## Furniture roots keyed by room name, filled in once ManorDressing has built
+## them. Empty until then, and empty forever if the furniture failed to load,
+## in which case the cull quietly does nothing.
+var furniture_rooms: Dictionary = {}
+
+## The room the cull last ran for, so walking around inside one room costs a
+## nearest-centre lookup and nothing else.
+var _culled_for_room := ""
+
+## The four grid steps a doorway can lead through. Typed, so the loop variable
+## comes out as a Vector2i rather than a Variant.
+const DOORWAY_STEPS: Array[Vector2i] = [
+	Vector2i(-1, 0), Vector2i(1, 0), Vector2i(0, -1), Vector2i(0, 1)
+]
+
+
+func _index_furniture_rooms() -> void:
+	furniture_rooms.clear()
+	_culled_for_room = ""
+	if not is_instance_valid(furniture):
+		return
+	for child in furniture.get_children():
+		if child is Node3D:
+			furniture_rooms[String(child.name)] = child
+
+
+func _process(_delta: float) -> void:
+	_update_furniture_visibility()
+
+
+func _update_furniture_visibility() -> void:
+	if furniture_rooms.is_empty() or not is_instance_valid(player):
+		return
+	var here := _room_at(player.global_position)
+	if here == _culled_for_room:
+		return
+	_culled_for_room = here
+
+	var in_sight := _rooms_in_sight(here)
+	for rname in furniture_rooms.keys():
+		var node: Node3D = furniture_rooms[rname]
+		if is_instance_valid(node):
+			node.visible = in_sight.has(rname)
+
+
+## The room you are standing in plus the ones it has doorways to, as a set. Uses
+## grid_pos rather than hardcoded neighbours so it survives any reshuffle of
+## GRID. An unrecognised room shows everything, on the principle that a bug here
+## should look like no optimisation rather than like an empty house.
+func _rooms_in_sight(here: String) -> Dictionary:
+	# Upstairs is its own plus-shaped grid and obeys the same rule, so standing on
+	# the landing lets the entire ground floor stop rendering, and vice versa. The
+	# two floors never appear in each other's neighbour set, which is exactly
+	# right: a solid slab sits between them everywhere except the stairwell.
+	if upper_grid_pos.has(here):
+		return _neighbours_of(here, upper_grid_pos)
+	if grid_pos.has(here):
+		return _neighbours_of(here, grid_pos)
+
+	var out := {}
+	for rname in furniture_rooms.keys():
+		out[rname] = true
+	return out
+
+
+## The room plus whatever it has doorways to, on one floor. Works off the
+## name -> cell mapping rather than a grid array, so a plus-shaped floor with
+## holes in it needs no bounds arithmetic: a cell with no room simply is not in
+## the dictionary.
+func _neighbours_of(here: String, cells: Dictionary) -> Dictionary:
+	var by_cell := {}
+	for rname in cells.keys():
+		by_cell[cells[rname]] = rname
+
+	var out := {here: true}
+	var cell: Vector2i = cells[here]
+	for step in DOORWAY_STEPS:
+		var probe: Vector2i = cell + step
+		if by_cell.has(probe):
+			out[String(by_cell[probe])] = true
+	return out
 
 
 # ------------------------------------------------------- room navigation --
@@ -1095,11 +1368,29 @@ func hall_attendees() -> Array:
 ## grid is evenly spaced and every room is the same size, so nearest-center is
 ## exactly equivalent to a cell lookup here, without duplicating the PITCH/CELL
 ## arithmetic that _build_mansion() already owns.
+## Height at which a point stops counting as being on the ground floor. Half
+## way up a wall: high enough that nothing standing downstairs ever trips it,
+## low enough that you are counted as upstairs before your feet reach the
+## landing, which is what matters on the way up the last few treads.
+const UPSTAIRS_Y := WALL_H * 0.5
+
+
 func _room_at(pos: Vector3) -> String:
+	# Nearest centre is only equivalent to a cell lookup within a single storey.
+	# This used to ignore Y completely, so standing on the landing resolved to
+	# whichever ground room was closest - the map said you were in the Hall, the
+	# furniture cull hid the room you were standing in, and a group confrontation
+	# could be opened straight through the stairwell floor.
+	if pos.y > UPSTAIRS_Y and not upper_room_centers.is_empty():
+		return _nearest_room(pos, upper_room_centers)
+	return _nearest_room(pos, room_centers)
+
+
+func _nearest_room(pos: Vector3, centres: Dictionary) -> String:
 	var best := ""
 	var best_d := INF
-	for rname in room_centers.keys():
-		var c: Vector3 = room_centers[rname]
+	for rname in centres.keys():
+		var c: Vector3 = centres[rname]
 		var d := Vector2(pos.x - c.x, pos.z - c.z).length_squared()
 		if d < best_d:
 			best_d = d
@@ -1449,9 +1740,20 @@ func toggle_map() -> void:
 ## here" tint change - the cells themselves are built once, since the floor
 ## plan never changes during a game.
 func _refresh_map() -> void:
+	# Upstairs rooms have no cell of their own on the map, so the detective is
+	# marked on the ground room directly beneath them and the cell says which
+	# upstairs room it is. Better than a map with no "you are here" on it at all.
 	var player_room := ""
+	var player_upstairs := ""
 	if is_instance_valid(player):
-		player_room = _room_at(player.global_position)
+		var here := _room_at(player.global_position)
+		if upper_grid_pos.has(here):
+			player_upstairs = here
+			var ucell: Vector2i = upper_grid_pos[here]
+			if ucell.x >= 0 and ucell.x < GRID.size() and ucell.y >= 0 and ucell.y < GRID[ucell.x].size():
+				player_room = String(GRID[ucell.x][ucell.y])
+		else:
+			player_room = here
 
 	# Bucket the suspects by room in a single pass, rather than scanning all
 	# eight NPCs again for each of the nine cells.
@@ -1476,7 +1778,10 @@ func _refresh_map() -> void:
 		var key := String(rname)
 		var lines := []
 		if key == player_room:
-			lines.append("[b]You are here[/b]")
+			if player_upstairs != "":
+				lines.append("[b]You are upstairs, in the %s[/b]" % player_upstairs)
+			else:
+				lines.append("[b]You are here[/b]")
 		for id in by_room.get(key, []):
 			var c := GameManager.get_character(String(id))
 			var col: Color = NPC_COLORS.get(id, Color.WHITE)
@@ -2752,6 +3057,78 @@ func _section_or_placeholder(text: String) -> String:
 const TIMELINE_UNKNOWN := "Unclear"
 
 
+## Fragments that mean the model has narrated the interrogation instead of last
+## night, or promoted another guest's overheard line into this suspect's alibi.
+## The summary prompt forbids both, but it is a small local model and it still
+## slips, and when it slips the player opens the notepad to a timeline of their
+## own conversation. Dropping the row costs a short timeline instead of a
+## nonsense one.
+const TIMELINE_REJECT := ["detective", "overheard", "the player"]
+
+## Shown when the model left the claim side of a bullet empty, or filled it with
+## the "Unclear" placeholder that belongs in the time column. A gap in the
+## account is worth keeping: it is exactly the half hour worth asking about.
+const TIMELINE_NO_CLAIM := "Whereabouts not stated."
+
+## The murder night runs from dinner at eight until midnight, with a little
+## slack at either end. A clock time outside this window is one the model made
+## up, nearly always by dating the morning's questioning, so the claim survives
+## and the invented time does not.
+const TIMELINE_EARLIEST_MIN := 18 * 60
+const TIMELINE_LATEST_MIN := 25 * 60
+
+## Compiled on first use and reused: the notepad re-parses a timeline every time
+## a suspect's tab is drawn.
+var _timeline_time_re: RegEx = null
+
+
+## Reads the first clock time out of a time cell ("9:20pm", "9:00pm-9:20pm",
+## "around 10pm") as minutes past midnight, with small-hours times pushed past
+## the 24h mark so they sort as the same night: 8:00pm is 1200, 12:30am is 1470.
+## Returns -1 when the cell holds no clock time at all, which is not a problem,
+## since "After dinner" is a perfectly good thing to leave in the time column.
+func _timeline_minutes(raw: String) -> int:
+	if _timeline_time_re == null:
+		_timeline_time_re = RegEx.new()
+		_timeline_time_re.compile("(\\d{1,2})(?::(\\d{2}))?\\s*([ap])\\.?m")
+	var m := _timeline_time_re.search(raw.to_lower())
+	if m == null:
+		return -1
+	var hour := int(m.get_string(1))
+	var minute := 0
+	if m.get_string(2) != "":
+		minute = int(m.get_string(2))
+	if m.get_string(3) == "p" and hour != 12:
+		hour += 12
+	elif m.get_string(3) == "a" and hour == 12:
+		hour = 0
+	var total := hour * 60 + minute
+	if total < 6 * 60:
+		total += 24 * 60  # 12:30am is the end of last night, not the start of it.
+	return total
+
+
+## True for a row that is about the questioning rather than about last night.
+func _timeline_row_rejected(event: String) -> bool:
+	var lowered := event.to_lower()
+	for frag in TIMELINE_REJECT:
+		if lowered.find(String(frag)) != -1:
+			return true
+	return false
+
+
+## Strips a bullet's claim down to letters and digits, so "Unclear | ...", "..."
+## and "" all collapse to something testable.
+func _timeline_claim_is_blank(event: String) -> bool:
+	var squashed := ""
+	var lowered := event.to_lower()
+	for i in range(lowered.length()):
+		var code := lowered.unicode_at(i)
+		if (code >= 97 and code <= 122) or (code >= 48 and code <= 57):
+			squashed += String.chr(code)
+	return squashed == "" or squashed == "unclear" or squashed == "unknown" or squashed == "na"
+
+
 ## The model returns TIMELINE bullets as "- TIME | what they claim". Laying
 ## them out as a two-column table puts every time in its own aligned column,
 ## so an evening can be scanned at a glance instead of read as four sentences.
@@ -2794,24 +3171,49 @@ func _parse_timeline_rows(raw: String) -> Array:
 
 		var time_part := TIMELINE_UNKNOWN
 		var event_part := t
-		var pipe := t.find("|")
-		if pipe != -1:
-			var left := t.substr(0, pipe).strip_edges()
-			var right := t.substr(pipe + 1).strip_edges()
-			if right != "":
+		if t.find("|") != -1:
+			# Split on every pipe, not just the first. The model sometimes adds a
+			# third field ("9:30pm | In the Hall, overheard | ..."), and reading
+			# only as far as the first pipe leaves that marker in the event column.
+			var parts := t.split("|", false)
+			var head := String(parts[0]).strip_edges()
+			var tail := []
+			for i in range(1, parts.size()):
+				var seg := String(parts[i]).strip_edges()
+				if seg != "":
+					tail.append(seg)
+			if not tail.is_empty():
 				saw_pipe = true
-				event_part = right
-				if left != "":
-					time_part = left
+				event_part = ", ".join(PackedStringArray(tail))
+				if head != "":
+					time_part = head
+
+		# Last night only. A bullet narrating the questioning itself gets dropped
+		# rather than shown with a made-up clock time beside it.
+		if _timeline_row_rejected(event_part):
+			continue
+		if _timeline_claim_is_blank(event_part):
+			event_part = TIMELINE_NO_CLAIM
 
 		var lowered := time_part.to_lower()
 		if lowered.begins_with("unclear") or lowered.begins_with("unknown") or lowered.begins_with("unspecified"):
+			time_part = TIMELINE_UNKNOWN
+		else:
+			var mins := _timeline_minutes(time_part)
+			if mins != -1 and (mins < TIMELINE_EARLIEST_MIN or mins > TIMELINE_LATEST_MIN):
+				time_part = TIMELINE_UNKNOWN
+
+		if time_part == TIMELINE_UNKNOWN:
 			untimed.append({"time": TIMELINE_UNKNOWN, "event": event_part})
 		else:
 			timed.append({"time": time_part, "event": event_part})
 
 	if not saw_pipe:
 		return []
+	if timed.is_empty() and untimed.is_empty():
+		# Every bullet was about the questioning. Say so, rather than returning
+		# empty and letting the caller print the raw block we just rejected.
+		return [{"time": TIMELINE_UNKNOWN, "event": "No account of last night yet."}]
 	# Timed rows keep the model's chronological order; vague ones sink to the bottom.
 	return timed + untimed
 
