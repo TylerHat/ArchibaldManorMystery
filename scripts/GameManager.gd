@@ -1442,14 +1442,35 @@ func request_summary(character_id: String) -> void:
 	var sys_prompt := ""
 	sys_prompt += "You are a detective's case-notes assistant in a murder-mystery game called Archibald Manor. "
 	sys_prompt += "Below is the full record so far for one suspect. "
+
+	# The record spans two separate times, and the model will smear them into one
+	# if you let it. The murder happened last night between dinner and midnight;
+	# the questioning in the transcript is happening the next MORNING. Without
+	# this paragraph the summarizer marches the clock forward through the
+	# interrogation itself - "10:40pm | The detective attacks Sam", "11:15pm |
+	# Sam becomes a zombie" - and the player opens the notepad to a timeline of
+	# their own conversation instead of the suspect's alibi.
+	sys_prompt += "TWO SEPARATE TIMES matter here, and you must never mix them up. "
+	sys_prompt += "(1) LAST NIGHT is when the murder happened, between dinner at 8:00pm and midnight. "
+	sys_prompt += "(2) THIS MORNING is when the detective is doing the questioning you are about to read. "
+	sys_prompt += "The questioning happened hours after the murder, it is not part of last night, and it has no clock times at all.\n\n"
 	sys_prompt += "Organize this into exactly four sections. Respond using EXACTLY this "
 	sys_prompt += "format and these four markers, in this order, with nothing before, between, or after them:\n\n"
-	sys_prompt += "##TIMELINE##\n- their claimed whereabouts/alibi/account of events around the time of the murder\n"
-	sys_prompt += "  IMPORTANT: every TIMELINE bullet must be written as '- TIME | what they claim', with a single "
-	sys_prompt += "pipe character separating the two. Put the clock time first, exactly as they stated it "
+	sys_prompt += "##TIMELINE##\n- ONLY where this suspect says they themselves were LAST NIGHT, between 8:00pm and midnight\n"
+	sys_prompt += "  IMPORTANT: every TIMELINE bullet must be written as '- TIME | what they claim', with exactly one "
+	sys_prompt += "pipe character in the whole bullet, separating the two. Put the clock time first, exactly as they stated it "
 	sys_prompt += "(for example '- 8:30pm | In the Dining Room with everyone'). Use a range like '9:00pm-9:20pm' "
-	sys_prompt += "when they gave one. If they gave no time at all for a claim, write '- Unclear | ...' for that bullet. "
-	sys_prompt += "Keep the part after the pipe to one short clause. List the bullets in chronological order. "
+	sys_prompt += "when they gave one. NEVER invent, guess, estimate or interpolate a time. If they did not state a clock "
+	sys_prompt += "time for a claim, that bullet is '- Unclear | ...' and it stays Unclear. Do not space the bullets out at "
+	sys_prompt += "even intervals, and do not let the clock creep forward as the conversation goes on - the order lines "
+	sys_prompt += "appear in the record tells you nothing about what time they happened. Every clock time you write must be "
+	sys_prompt += "one the suspect actually said, and it must fall between 8:00pm and midnight.\n"
+	sys_prompt += "  NEVER put any of these in TIMELINE: anything the detective said or did; anything that happened during "
+	sys_prompt += "the questioning itself; the suspect answering, admitting, denying, refusing, or being asked something; or a "
+	sys_prompt += "line spoken by another guest (an '[In the hall, overheard]' line), which belongs in CONTRADICTIONS instead. "
+	sys_prompt += "The detective must never appear in a TIMELINE bullet. If the suspect has not given any account of last "
+	sys_prompt += "night yet, write the single bullet '- Unclear | No account of last night yet.'\n"
+	sys_prompt += "  Keep the part after the pipe to one short clause. List the bullets in chronological order. "
 	sys_prompt += "Only the TIMELINE bullets use this pipe format - the other three sections stay as plain sentences.\n"
 	sys_prompt += "##MOTIVE##\n- any possible reason they might have had to kill the victim - grudges, money, secrets, relationships\n"
 	sys_prompt += "##SLIPUPS##\n- anything suspicious, evasive, defensive, or inconsistent in how they answered\n"

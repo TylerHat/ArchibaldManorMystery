@@ -45,6 +45,46 @@ const BODY_RADIUS := 0.4
 ## whatever the model actually has rather than a fixed set of slots.
 const COLOR_PREFIX := "color_"
 
+## Material names repainted in the suspect's own notepad colour, so the person
+## standing in the room is the same colour as their name in the case notes.
+## Listed per suspect in suspect_models.cfg rather than hardcoded, because which
+## material is "the outfit" differs by model: the Casual bodies wear a Shirt,
+## the Suits wear Black with Details for trim, the Doctor wears Main and the
+## Wizard wears Clothes. Comma-separated, e.g. tint_main="shirt, vest".
+##
+## An explicit color_<material> line always wins over a derived tint, so any one
+## suspect can still be dressed entirely by hand.
+const TINT_MAIN_KEY := "tint_main"
+const TINT_ACCENT_KEY := "tint_accent"
+
+
+# suspect_models.cfg was re-read from disk once per suspect and again for the
+# victim - thirteen parses of the same small file inside a single spawn. Read it
+# once and hand the same object out. reset_config_cache() is called at the start
+# of every game so editing the file and hitting Play Again still picks it up,
+# which is the workflow the file's own header promises.
+static var _cfg_cache: ConfigFile = null
+static var _cfg_cache_ok := false
+static var _cfg_cache_valid := false
+
+
+## Drops the cached suspect_models.cfg so the next spawn re-reads it. Called
+## from Main._start_game().
+static func reset_config_cache() -> void:
+	_cfg_cache = null
+	_cfg_cache_ok = false
+	_cfg_cache_valid = false
+
+
+## The parsed config, and whether it loaded at all. Every caller shares one
+## instance; nothing here ever writes to it.
+static func _config() -> Array:
+	if not _cfg_cache_valid:
+		_cfg_cache_valid = true
+		_cfg_cache = ConfigFile.new()
+		_cfg_cache_ok = _cfg_cache.load(CONFIG_PATH) == OK
+	return [_cfg_cache, _cfg_cache_ok]
+
 ## Clip names looked for inside an imported model, best match first. Matching
 ## ignores case and any "Armature|" style prefix, so "Armature|walk_a" here
 ## matches "Walk_A" below.
@@ -130,10 +170,11 @@ static func build_from_dir(dir_path: String, section: String, fallback_color: Co
 		return _build_capsule(fallback_color)
 
 	model.name = "Model"
-	var cfg := ConfigFile.new()
-	var has_cfg := cfg.load(CONFIG_PATH) == OK
+	var loaded := _config()
+	var cfg: ConfigFile = loaded[0]
+	var has_cfg: bool = loaded[1]
 	_apply_tuning(model, cfg, has_cfg, section)
-	_apply_recolor(model, cfg, has_cfg, section)
+	_apply_recolor(model, cfg, has_cfg, section, fallback_color)
 	return model
 
 
@@ -299,12 +340,23 @@ static func _collect_bounds(node: Node, xform: Transform3D, acc: Dictionary) -> 
 ## per-suspect section overrides it. Does nothing when the config names no
 ## colors, which keeps the model exactly as the artist authored it.
 static func _apply_recolor(
-	model: Node3D, cfg: ConfigFile, has_cfg: bool, character_id: String
+	model: Node3D, cfg: ConfigFile, has_cfg: bool, character_id: String, ui_color: Color
 ) -> void:
 	if not has_cfg:
 		return
 
 	var wanted := {}
+
+	# Derived tints go in first so an explicit color_<material> line below can
+	# still override them. ui_color is the suspect's NPC_COLORS entry - the same
+	# colour their name is printed in throughout the notepad and the map - which
+	# is what ties the two together: change the palette in Main.gd and the cast
+	# redresses itself.
+	for mat_name in _cfg_names(cfg, has_cfg, character_id, TINT_MAIN_KEY):
+		wanted[mat_name] = _garment_color(ui_color)
+	for mat_name in _cfg_names(cfg, has_cfg, character_id, TINT_ACCENT_KEY):
+		wanted[mat_name] = _accent_color(ui_color)
+
 	for section in ["default", character_id]:
 		if not cfg.has_section(section):
 			continue
@@ -339,6 +391,36 @@ static func _recolor_node(node: Node, wanted: Dictionary) -> void:
 
 	for child in node.get_children():
 		_recolor_node(child, wanted)
+
+
+## Reads a comma-separated material list out of the config ("shirt, details"),
+## trimmed and lowercased to match how _recolor_node() keys materials. Empty
+## when the key is absent, which is what leaves the victim - who has no notepad
+## colour of his own - exactly as the artist authored him.
+static func _cfg_names(
+	cfg: ConfigFile, has_cfg: bool, character_id: String, key: String
+) -> Array:
+	var out := []
+	for part in String(_cfg_value(cfg, has_cfg, character_id, key, "")).split(",", false):
+		var mat_name := String(part).strip_edges().to_lower()
+		if mat_name != "":
+			out.append(mat_name)
+	return out
+
+
+## The notepad palette is picked for maximum separation against a dark UI, which
+## makes several of those colours read as hi-vis once they are worn. Pulling
+## saturation and brightness back into fabric range keeps each suspect
+## recognisably their own colour without dressing the cast in safety vests.
+static func _garment_color(ui: Color) -> Color:
+	return Color.from_hsv(ui.h, minf(ui.s, 0.62), clampf(ui.v * 0.78, 0.18, 0.72))
+
+
+## Trim, a tie, a hat band. A small surface can carry the colour at full
+## strength, and that is what makes the match to the notepad readable across a
+## room rather than only from arm's length.
+static func _accent_color(ui: Color) -> Color:
+	return Color.from_hsv(ui.h, minf(ui.s * 1.15, 0.88), clampf(ui.v * 1.05, 0.35, 0.95))
 
 
 ## Accepts either an HTML string ("#e8c19a") or a Color written straight into

@@ -40,7 +40,17 @@ const WALL_H := 3.0     # wall height
 const WALL_T := 0.4     # wall thickness
 const DOOR_W := 3.0     # width of the gap left for a doorway
 const FLOOR_T := 0.2    # floor slab thickness
-const STOREY := 4.0     # vertical distance between floor levels
+# Vertical distance between floor levels. 3.2 is not arbitrary: Main.gd roofs
+# every ground-floor room with a 0.2-thick ceiling slab occupying y 3.0 to 3.2,
+# and an upper room at level 1 puts its floor slab at center.y - FLOOR_T/2,
+# occupying exactly the same band. So the upper floor IS the ceiling of the
+# rooms beneath it - one slab, no gap between the top of the ground-floor walls
+# and the floor above, and no pair of coplanar slabs to z-fight. Main skips its
+# own ceiling for any room that has an upper room over it.
+#
+# Raising this back to 4.0 reopens a 0.8 band above the ground-floor walls that
+# you can see straight over into the next room.
+const STOREY := 3.2     # vertical distance between floor levels
 
 # How far a wall runs along its own axis.
 #
@@ -75,6 +85,11 @@ const FLOORS := [
 		"id": "ground",
 		"level": 0,
 		"enabled": true,
+		# Indexed but not built. Main.gd still owns the ground floor; this entry
+		# exists so room_centers knows where the Hall is, which is what the stair
+		# flight measures its rise from. Flip to true only if Main ever stops
+		# building the mansion itself.
+		"emit": false,
 		"grid": [
 			["Kitchen", "Ballroom", "Conservatory"],
 			["Lounge", "Dining Room", "Study"],
@@ -82,12 +97,17 @@ const FLOORS := [
 		],
 	},
 	{
-		# PHASE 2. Flip "enabled" to true once the Main.gd changes listed in
-		# MANOR_BUILDER.md are in. Geometry alone works today, but pathing,
-		# _room_at() and the map panel are all still single-floor.
+		# LIVE. Built at runtime by Main._build_upper_floor(), which instantiates
+		# this script with build_ground_plane off. These room names are deliberately
+		# kept OUT of Main.GRID, Main.grid_pos, Main.room_centers and
+		# CaseGenerator.GRID: the case generator is a closed system over its own
+		# private grid, so a room it has never heard of cannot end up in a schedule,
+		# an alibi, a witness list or the murder room. That is what keeps every
+		# suspect downstairs without a single change to the generator.
 		"id": "upper",
 		"level": 1,
-		"enabled": false,
+		"enabled": true,
+		"emit": true,
 		"grid": [
 			["", "Master Bedroom", ""],
 			["Nursery", "Landing", "Guest Room"],
@@ -103,8 +123,31 @@ const FLOORS := [
 #   length     how far into the room the flight reaches. Leave it short of CELL
 #              or the bottom step lands flush against the opposite wall, which
 #              in the Hall's case is the front door.
+#   offset     sideways shift across the room, perpendicular to the climb.
+#   extend_to_wall
+#              whether the stairwell opening is stretched out to the wall the
+#              flight arrives at. Only wanted when the top step really does
+#              reach that wall; otherwise it opens a slot between the top step
+#              and the wall instead of leaving continuous floor there.
+#
+# WHY THIS FLIGHT IS WHERE IT IS. Every wall of the Hall has a 3m doorway in the
+# middle of it, and the middle of the room is spoken for three times over: it is
+# where the first suspect in a room spawns, where every NPC's travel path
+# terminates, and where the player spawns. The clear ground is the corners.
+#
+# So: hard against the west wall (inner face x = -6.3 now that Main's walls sit
+# on the room boundary too), north of the Billiard Room doorway (which spans
+# z 11.5 to 14.5), climbing north. The flight occupies x -6.3..-4.1, z 7.0..10.8.
+# Nearest approach to the Hall centre is 4.6m, well outside the 3.4m disc the
+# meetup ring and the wander box need, and 0.7m clear of the doorway. You come up
+# in the north-west corner of the Stair Hall and step off the top tread eastward
+# onto the landing floor, which is at exactly the same height.
 const STAIRS := [
-	{"from": "Hall", "to": "Stair Hall", "side": "north", "steps": 14, "width": 3.0, "length": 8.0},
+	{
+		"from": "Hall", "to": "Stair Hall", "side": "north",
+		"steps": 15, "width": 2.2, "length": 3.8, "offset": -5.2,
+		"extend_to_wall": false,
+	},
 ]
 
 const ROOM_COLORS := {
@@ -198,7 +241,9 @@ var _shape_cache: Dictionary = {}   # "x,y,z" -> BoxShape3D, shared between iden
 var _pending: Dictionary = {}       # bucket name -> Array of {size, pos, color}
 var _unit_box: BoxMesh
 var _stair_steps: Array = []        # precomputed step boxes
+var _stair_ramps: Array = []        # one convex wedge per flight, collision only
 var _openings: Dictionary = {}      # room name -> Rect2 hole in that room's floor slab (world XZ)
+var _opening_arrival: Dictionary = {}  # room name -> which side the flight climbs toward
 
 
 func _ready() -> void:
@@ -222,6 +267,8 @@ func rebuild() -> void:
 	_emit_ground()
 	_emit_rooms()
 	_emit_stair_steps()
+	_emit_stair_ramps()
+	_emit_railings()
 	_flush()
 	_finalise_owners()
 
@@ -278,6 +325,18 @@ func _enabled_floors() -> Array:
 	var out := []
 	for f in FLOORS:
 		if f.get("enabled", true):
+			out.append(f)
+	return out
+
+
+## Floors whose geometry this script actually builds. A floor can be enabled
+## (so it is indexed, and stairs can measure against it) without being emitted,
+## which is how the upper floor is built alongside a ground floor that Main.gd
+## still owns.
+func _emitted_floors() -> Array:
+	var out := []
+	for f in _enabled_floors():
+		if f.get("emit", true):
 			out.append(f)
 	return out
 
@@ -363,7 +422,7 @@ func _emit_ground() -> void:
 
 
 func _emit_rooms() -> void:
-	for f in _enabled_floors():
+	for f in _emitted_floors():
 		var level: int = f["level"]
 		var grid: Array = f["grid"]
 		for row in range(grid.size()):
@@ -451,9 +510,14 @@ func _emit_wall(rname: String, level: int, row: int, col: int, dir: String) -> v
 				Vector3(x, base_y, center.z), WALL_COLOR, rname + "_" + dir)
 
 
-## Minimum clearance between a step's top surface and the slab above it. Any
-## step with less headroom than this sits under the stairwell opening.
-const STAIR_HEADROOM := 2.0
+## Clearance a walking player needs between their feet and the underside of the
+## slab above. Any stretch of flight with less than this sits under the stairwell
+## opening instead. The collision capsule is 1.8 tall, so this is that plus a
+## comfortable margin - at 2.6 the whole of a normal flight opens up and there is
+## never anything over your head on the way up.
+##
+## Raise it to open more of the flight, lower it to leave more ceiling in place.
+const STAIR_HEADROOM := 2.6
 
 
 ## Builds the step boxes and works out where the floor above has to be cut.
@@ -463,7 +527,9 @@ const STAIR_HEADROOM := 2.0
 ## so with side = "north" you walk north and up. Flip the side to reverse it.
 func _compute_stairs() -> void:
 	_stair_steps.clear()
+	_stair_ramps.clear()
 	_openings.clear()
+	_opening_arrival.clear()
 
 	for s in STAIRS:
 		var from_name: String = s["from"]
@@ -486,6 +552,9 @@ func _compute_stairs() -> void:
 		var run := length / float(steps)
 		var dir_sign := -1.0 if side in ["north", "west"] else 1.0
 		var horizontal := side in ["north", "south"]
+		# Sideways across the room, perpendicular to the climb: X for a flight that
+		# runs north-south, Z for one that runs east-west.
+		var lateral: float = s.get("offset", 0.0)
 
 		# Footprint of the steps that pass under the slab above, in world XZ.
 		var hole_min := Vector2(INF, INF)
@@ -500,10 +569,10 @@ func _compute_stairs() -> void:
 			var pos: Vector3
 			var size: Vector3
 			if horizontal:
-				pos = Vector3(base.x, base.y + h / 2.0, base.z + along)
+				pos = Vector3(base.x + lateral, base.y + h / 2.0, base.z + along)
 				size = Vector3(width, h, run)
 			else:
-				pos = Vector3(base.x + along, base.y + h / 2.0, base.z)
+				pos = Vector3(base.x + along, base.y + h / 2.0, base.z + lateral)
 				size = Vector3(run, h, width)
 
 			_stair_steps.append({
@@ -512,33 +581,175 @@ func _compute_stairs() -> void:
 				"name": "%s_to_%s_step_%02d" % [from_name, to_name, i],
 			})
 
-			# Does a person on this step have room to stand?
-			if base.y + h > top_y - STAIR_HEADROOM:
+			# Does a person walking over this step have room to stand? The original
+			# test measured the tread's own top against top_y, and was wrong twice
+			# over in the same direction - together the two errors cost 0.4m and put
+			# the slab through your head about a third of the way up.
+			#
+			# 1. The ceiling is the slab's UNDERSIDE, at top_y - FLOOR_T, not the
+			#    walking surface at top_y.
+			# 2. You do not walk on the treads, you walk on the ramp, which sits one
+			#    rise above the tread at the back of each step. The highest your feet
+			#    get anywhere over step i is therefore the height of step i+1.
+			if base.y + rise * float(i + 2) + STAIR_HEADROOM > top_y - FLOOR_T:
 				hole_min.x = min(hole_min.x, pos.x - size.x / 2.0)
 				hole_min.y = min(hole_min.y, pos.z - size.z / 2.0)
 				hole_max.x = max(hole_max.x, pos.x + size.x / 2.0)
 				hole_max.y = max(hole_max.y, pos.z + size.z / 2.0)
 
+		# A capsule does not climb stairs on its own. Godot's CharacterBody3D has no
+		# step-up, this project never set floor_max_angle, and a 0.4 radius meeting
+		# a 0.21 riser contacts it where the surface normal points slightly DOWN -
+		# so move_and_slide pushes you back off the tread instead of over it, and
+		# the only way up is to jump every step.
+		#
+		# The fix is a collision-only wedge whose sloped face passes exactly through
+		# every step nose: the treads stay visible, the player walks up a plain
+		# incline. Its slope is total_rise / length, which for any sane flight is
+		# well under the 45 degrees Godot treats as walkable floor.
+		#
+		# The toe is carried one run PAST the bottom step so the ramp meets the floor
+		# at y = 0 rather than starting with a 0.21 lip of its own.
+		var a_toe := dir_sign * (CELL / 2.0 - length - run)
+		var a_top := dir_sign * (CELL / 2.0 - run)
+		var hw := width / 2.0
+		var y_lo := base.y
+		var y_hi := base.y + total_rise
+		var pts := PackedVector3Array()
+		if horizontal:
+			var rx := base.x + lateral
+			pts.append(Vector3(rx - hw, y_lo, base.z + a_toe))
+			pts.append(Vector3(rx + hw, y_lo, base.z + a_toe))
+			pts.append(Vector3(rx - hw, y_lo, base.z + a_top))
+			pts.append(Vector3(rx + hw, y_lo, base.z + a_top))
+			pts.append(Vector3(rx - hw, y_hi, base.z + a_top))
+			pts.append(Vector3(rx + hw, y_hi, base.z + a_top))
+		else:
+			var rz := base.z + lateral
+			pts.append(Vector3(base.x + a_toe, y_lo, rz - hw))
+			pts.append(Vector3(base.x + a_toe, y_lo, rz + hw))
+			pts.append(Vector3(base.x + a_top, y_lo, rz - hw))
+			pts.append(Vector3(base.x + a_top, y_lo, rz + hw))
+			pts.append(Vector3(base.x + a_top, y_hi, rz - hw))
+			pts.append(Vector3(base.x + a_top, y_hi, rz + hw))
+		_stair_ramps.append({
+			"points": pts,
+			"name": "%s_to_%s_ramp" % [from_name, to_name],
+			"degrees": rad_to_deg(atan2(total_rise, length)),
+		})
+
 		if hole_min.x < INF:
 			# Extend the opening out to the wall the flight arrives at, so the
 			# top step emerges level with the upper floor rather than under a
-			# lip of slab.
-			if horizontal:
-				if dir_sign < 0.0:
-					hole_min.y = min(hole_min.y, base.z - PITCH / 2.0)
+			# lip of slab. Only correct when the flight genuinely reaches that
+			# wall - see extend_to_wall in the STAIRS notes.
+			if bool(s.get("extend_to_wall", true)):
+				if horizontal:
+					if dir_sign < 0.0:
+						hole_min.y = min(hole_min.y, base.z - PITCH / 2.0)
+					else:
+						hole_max.y = max(hole_max.y, base.z + PITCH / 2.0)
 				else:
-					hole_max.y = max(hole_max.y, base.z + PITCH / 2.0)
-			else:
-				if dir_sign < 0.0:
-					hole_min.x = min(hole_min.x, base.x - PITCH / 2.0)
-				else:
-					hole_max.x = max(hole_max.x, base.x + PITCH / 2.0)
+					if dir_sign < 0.0:
+						hole_min.x = min(hole_min.x, base.x - PITCH / 2.0)
+					else:
+						hole_max.x = max(hole_max.x, base.x + PITCH / 2.0)
 			_openings[to_name] = Rect2(hole_min, hole_max - hole_min)
+			_opening_arrival[to_name] = side
 
 
 func _emit_stair_steps() -> void:
 	for st in _stair_steps:
 		_box("stairs", st["size"], st["pos"], Color(0.5, 0.4, 0.3), st["name"])
+
+
+## Invisible walking surface over each flight. Collision only - it is added
+## straight to the shared body rather than going through a render bucket, since
+## there is deliberately nothing to draw.
+func _emit_stair_ramps() -> void:
+	for r in _stair_ramps:
+		var shape := ConvexPolygonShape3D.new()
+		shape.points = r["points"]
+		var coll := CollisionShape3D.new()
+		coll.name = String(r["name"])
+		coll.shape = shape
+		_collision_body.add_child(coll)
+		if float(r["degrees"]) > 44.0:
+			push_warning("ManorBuilder: '%s' rises at %.1f degrees, past the angle Godot walks up. Add steps or lengthen the flight." % [r["name"], r["degrees"]])
+
+
+## Height and thickness of the parapet round a stairwell opening.
+const RAIL_H := 1.0
+const RAIL_T := 0.12
+const RAIL_COLOR := Color(0.42, 0.33, 0.24)
+
+## How much of the SIDE railings to leave out where the flight meets the landing.
+##
+## Leaving the arrival end open is not enough on its own. The flight climbs to
+## the wall, so the floor straight ahead of the top tread is only the strip
+## between that wall and the opening - here 0.30m, against a 0.80m player. The
+## way off the stairs is sideways onto the landing, and a parapet running the
+## full length of the well seals exactly that, leaving jumping as the only exit.
+##
+## So the two rails that run ALONGSIDE the flight stop short of the arrival end.
+## 1.1 clears the 0.80 capsule comfortably. It is the gap a real staircase has
+## between its newel post and the wall.
+const RAIL_LANDING_GAP := 1.1
+
+
+## Walls the height of a handrail around every open edge of a stairwell, except
+## the edge the flight climbs toward - that one is the way in. Without this the
+## landing is a hole in the floor with nothing between you and it, and the
+## suspects downstairs cannot even be blamed, because an NPC steers only in XZ
+## and will happily be pushed over an unguarded edge.
+func _emit_railings() -> void:
+	for rname in _openings.keys():
+		if not room_centers.has(rname):
+			continue
+		var hole: Rect2 = _openings[rname]
+		var centre: Vector3 = room_centers[rname]
+		var arrival := String(_opening_arrival.get(rname, ""))
+		var mid_y := centre.y + RAIL_H / 2.0
+		var half := PITCH / 2.0
+
+		var x0 := hole.position.x
+		var x1 := hole.position.x + hole.size.x
+		var z0 := hole.position.y
+		var z1 := hole.position.y + hole.size.y
+
+		# The rails that run alongside the flight stop short at the arrival end, so
+		# there is a doorway-sized gap to step through onto the landing. Only the
+		# axis the flight runs along is shortened; the rail across the far end of the
+		# well is the one you never walk through, and it stays full length.
+		var gx0 := x0
+		var gx1 := x1
+		var gz0 := z0
+		var gz1 := z1
+		match arrival:
+			"north": gz0 = minf(z0 + RAIL_LANDING_GAP, z1)
+			"south": gz1 = maxf(z1 - RAIL_LANDING_GAP, z0)
+			"west":  gx0 = minf(x0 + RAIL_LANDING_GAP, x1)
+			"east":  gx1 = maxf(x1 - RAIL_LANDING_GAP, x0)
+
+		# An edge the room's own wall already backs needs no rail - the wall is the
+		# rail - and the edge the stairs arrive at has to stay open or you cannot
+		# get off them. The margin is WALL_T rather than a hair, so an opening that
+		# runs right up to a wall's inner face does not get a parapet buried in it.
+		var edge := half - WALL_T - 0.01
+		var span_x := (gx1 - gx0) + RAIL_T * 2.0
+		var span_z := gz1 - gz0
+		if arrival != "north" and z0 > centre.z - edge and span_x > RAIL_T:
+			_box("rail", Vector3(span_x, RAIL_H, RAIL_T),
+				Vector3((gx0 + gx1) / 2.0, mid_y, z0), RAIL_COLOR, rname + "_rail_n")
+		if arrival != "south" and z1 < centre.z + edge and span_x > RAIL_T:
+			_box("rail", Vector3(span_x, RAIL_H, RAIL_T),
+				Vector3((gx0 + gx1) / 2.0, mid_y, z1), RAIL_COLOR, rname + "_rail_s")
+		if arrival != "west" and x0 > centre.x - edge and span_z > RAIL_T:
+			_box("rail", Vector3(RAIL_T, RAIL_H, span_z),
+				Vector3(x0, mid_y, (gz0 + gz1) / 2.0), RAIL_COLOR, rname + "_rail_w")
+		if arrival != "east" and x1 < centre.x + edge and span_z > RAIL_T:
+			_box("rail", Vector3(RAIL_T, RAIL_H, span_z),
+				Vector3(x1, mid_y, (gz0 + gz1) / 2.0), RAIL_COLOR, rname + "_rail_e")
 
 
 ## A floor slab with a rectangular bite taken out of it, emitted as up to four
@@ -719,6 +930,7 @@ func _flush() -> void:
 	_flush_bucket("Floors", "floor", _material_for("floor"))
 	_flush_bucket("Ceilings", "ceiling", _material_for("ceiling"))
 	_flush_bucket("Stairs", "stairs", _material_for("wall"))
+	_flush_bucket("Railings", "rail", _material_for("wall"))
 	_flush_bucket("Ground", "ground", _material_for("floor"))
 
 
