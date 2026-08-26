@@ -583,9 +583,11 @@ func _unhandled_input(event: InputEvent) -> void:
 			toggle_map()
 	# exact_match, or a bare "1" fires these too: is_action_pressed() ignores
 	# modifiers by default, so Ctrl+1 and plain 1 would both match.
-	elif event.is_action_pressed("toggle_debug", false, true):
+	# Short-circuits before is_action_pressed, which errors on an action the
+	# InputMap does not have - and with DEBUG_KEYS off, it does not have these.
+	elif GameManager.DEBUG_KEYS and event.is_action_pressed("toggle_debug", false, true):
 		toggle_debug()
-	elif event.is_action_pressed("toggle_prompt_dump", false, true):
+	elif GameManager.DEBUG_KEYS and event.is_action_pressed("toggle_prompt_dump", false, true):
 		GameManager.debug_dump_group = not GameManager.debug_dump_group
 		print("[DEBUG] Group prompt dump %s - the next line spoken in a hall meetup will print its full payload." % ("ON" if GameManager.debug_dump_group else "OFF"))
 

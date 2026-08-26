@@ -1,0 +1,6 @@
+[gd_scene format=3 uid="uid://bguardtest0001"]
+
+[ext_resource type="Script" path="res://Scripts/GuardTest.gd" id="1_guardtest"]
+
+[node name="GuardTest" type="Node"]
+script = ExtResource("1_guardtest")
