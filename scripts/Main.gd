@@ -74,6 +74,10 @@ const MAX_HALL_ATTENDEES := 4
 # retune those alongside this if you change it.
 const DIALOGUE_FONT_SIZE := 40
 
+# How tall the question boxes are allowed to grow. They open one row high and
+# grow a row at a time as the text wraps, then stop here and scroll instead.
+const INPUT_MAX_ROWS := 3
+
 # 3x3 layout. Hall (front door + player spawn) sits at the front-center so
 # the front door can face the exterior.
 const GRID := [
@@ -149,7 +153,7 @@ var prompt_label: Label
 var dialogue_panel: Panel
 var dialogue_name_label: Label
 var dialogue_log: RichTextLabel
-var dialogue_input: LineEdit
+var dialogue_input: TextEdit
 var dialogue_ask_button: Button
 var dialogue_status_label: Label
 var current_dialogue_character: String = ""
@@ -159,7 +163,7 @@ var current_dialogue_character: String = ""
 var group_panel: Panel
 var group_roster: HBoxContainer
 var group_log: RichTextLabel
-var group_input: LineEdit
+var group_input: TextEdit
 var group_say_button: Button
 var group_status_label: Label
 var group_frozen_ids: Array = [] # attendees currently held still by the open scene
@@ -1823,6 +1827,75 @@ func _scale_rich_text_font(rt: RichTextLabel) -> void:
 		rt.add_theme_font_size_override(key, DIALOGUE_FONT_SIZE)
 
 
+## The question boxes open one row high and grow as the text wraps, stopping at
+## INPUT_MAX_ROWS and scrolling past that. TextEdit has no maximum height, so
+## the growth is driven by hand off text_changed.
+##
+## Counts VISUAL rows rather than logical lines: get_line_count() is 1 for a
+## long wrapped question, and it is the wrapped rows the player can actually
+## see that the box has to be tall enough to show.
+##
+## The row height and the border are read back out of the theme instead of
+## being hardcoded, so the box still measures itself correctly if
+## DIALOGUE_FONT_SIZE is ever retuned.
+func _fit_input_height(box: TextEdit) -> void:
+	if box == null:
+		return
+	var rows := 0
+	for i in range(box.get_line_count()):
+		rows += 1 + box.get_line_wrap_count(i)
+	var unit: float = box.get_theme_font("font").get_height(DIALOGUE_FONT_SIZE) + box.get_theme_constant("line_spacing")
+	var sb := box.get_theme_stylebox("normal")
+	var chrome: float = sb.get_margin(SIDE_TOP) + sb.get_margin(SIDE_BOTTOM)
+	box.custom_minimum_size.y = clampi(rows, 1, INPUT_MAX_ROWS) * unit + chrome
+
+
+## Enter sends the line instead of typing a newline into it.
+##
+## Godot emits a Control's gui_input signal BEFORE running the node's own key
+## handling, so marking the event handled here means the TextEdit never sees
+## the key at all and no newline is inserted.
+##
+## There is deliberately no Shift+Enter escape hatch. A literal newline inside
+## a question would break out of the Markdown blockquote DialogueLog writes it
+## into, and would have to be scrubbed back out before the prompt and the log
+## anyway - and the box is meant to grow by wrapping, not by hard breaks.
+##
+## Returns true when the caller should send. Callers re-check their own state:
+## both send functions already bail on empty text, and the group one also bails
+## mid-round, which is the case the box is non-editable for.
+func _input_box_submitted(box: TextEdit, event: InputEvent) -> bool:
+	if not (event is InputEventKey):
+		return false
+	var key := event as InputEventKey
+	if not key.pressed or key.echo:
+		return false
+	# Tab would otherwise be typed into the question as literal whitespace, which
+	# then travels all the way to the model and the log. LineEdit moved focus on
+	# Tab; swallowing it is the closer of the two behaviours, and there is nowhere
+	# useful to tab to in a two-control panel anyway.
+	if key.keycode == KEY_TAB:
+		box.accept_event()
+		return false
+	if key.keycode != KEY_ENTER and key.keycode != KEY_KP_ENTER:
+		return false
+	# accept_event() marks the event handled on the box's own viewport, which is
+	# what stops TextEdit's own key handling from running and typing a newline.
+	# It is a no-op if the box somehow is not in the tree, so no null viewport.
+	box.accept_event()
+	return true
+
+
+func _on_dialogue_input_gui(event: InputEvent) -> void:
+	if _input_box_submitted(dialogue_input, event):
+		_send_question()
+
+
+func _on_group_input_gui(event: InputEvent) -> void:
+	if _input_box_submitted(group_input, event):
+		_send_group_line()
+
+
 func _build_dialogue_panel() -> void:
 	dialogue_panel = Panel.new()
 	dialogue_panel.set_anchors_preset(Control.PRESET_CENTER)
@@ -1845,7 +1918,11 @@ func _build_dialogue_panel() -> void:
 	vbox.add_child(dialogue_name_label)
 
 	dialogue_log = RichTextLabel.new()
-	dialogue_log.custom_minimum_size = Vector2(0, 390)
+	# Floor, not the height it renders at - the log is EXPAND_FILL and normally
+	# sits around 500. It only matters when the question box has grown to its
+	# full three rows, which takes 122px out of the log; 360 leaves that fitting
+	# inside the panel with room to spare rather than three pixels short.
+	dialogue_log.custom_minimum_size = Vector2(0, 360)
 	dialogue_log.bbcode_enabled = true
 	_scale_rich_text_font(dialogue_log)
 	dialogue_log.scroll_following = true
@@ -1864,16 +1941,31 @@ func _build_dialogue_panel() -> void:
 	var hbox := HBoxContainer.new()
 	vbox.add_child(hbox)
 
-	dialogue_input = LineEdit.new()
+	# TextEdit rather than LineEdit purely because LineEdit cannot wrap: it is
+	# single-line by design, with no wrap mode and no line count. Everything the
+	# panel relies on - placeholder_text, editable, grab_focus, text - carries
+	# over unchanged; only Enter has to be taken back by hand, in
+	# _on_dialogue_input_gui.
+	dialogue_input = TextEdit.new()
 	dialogue_input.placeholder_text = "Type your question..."
 	dialogue_input.custom_minimum_size = Vector2(1180, 0)
 	dialogue_input.add_theme_font_size_override("font_size", DIALOGUE_FONT_SIZE)
-	dialogue_input.text_submitted.connect(func(_t): _send_question())
+	dialogue_input.wrap_mode = TextEdit.LINE_WRAPPING_BOUNDARY
+	# Left off deliberately: it would grow the box without limit. _fit_input_height
+	# does the same job with a cap.
+	dialogue_input.scroll_fit_content_height = false
+	dialogue_input.gui_input.connect(_on_dialogue_input_gui)
+	dialogue_input.text_changed.connect(func(): _fit_input_height(dialogue_input))
 	hbox.add_child(dialogue_input)
+	_fit_input_height(dialogue_input)
 
 	dialogue_ask_button = Button.new()
 	dialogue_ask_button.text = "Ask"
 	dialogue_ask_button.add_theme_font_size_override("font_size", DIALOGUE_FONT_SIZE)
+	# Without this the button inherits FILL and stretches to match a grown input
+	# box. Pinned to the bottom instead, so it stays button-sized and sits level
+	# with the last line of the question.
+	dialogue_ask_button.size_flags_vertical = Control.SIZE_SHRINK_END
 	dialogue_ask_button.pressed.connect(_send_question)
 	hbox.add_child(dialogue_ask_button)
 
@@ -1916,7 +2008,8 @@ func _build_group_panel() -> void:
 	vbox.add_child(group_roster)
 
 	group_log = RichTextLabel.new()
-	group_log.custom_minimum_size = Vector2(0, 435)
+	# Same floor-not-height reasoning as the one-on-one panel's log.
+	group_log.custom_minimum_size = Vector2(0, 400)
 	group_log.bbcode_enabled = true
 	_scale_rich_text_font(group_log)
 	group_log.scroll_following = true
@@ -1934,16 +2027,23 @@ func _build_group_panel() -> void:
 	var hbox := HBoxContainer.new()
 	vbox.add_child(hbox)
 
-	group_input = LineEdit.new()
+	# Same swap and same reasoning as the one-on-one box. Wider, so it takes
+	# about 76 characters before it wraps rather than about 57.
+	group_input = TextEdit.new()
 	group_input.placeholder_text = "Say something to the room..."
 	group_input.custom_minimum_size = Vector2(1570, 0)
 	group_input.add_theme_font_size_override("font_size", DIALOGUE_FONT_SIZE)
-	group_input.text_submitted.connect(func(_t): _send_group_line())
+	group_input.wrap_mode = TextEdit.LINE_WRAPPING_BOUNDARY
+	group_input.scroll_fit_content_height = false
+	group_input.gui_input.connect(_on_group_input_gui)
+	group_input.text_changed.connect(func(): _fit_input_height(group_input))
 	hbox.add_child(group_input)
+	_fit_input_height(group_input)
 
 	group_say_button = Button.new()
 	group_say_button.text = "Say"
 	group_say_button.add_theme_font_size_override("font_size", DIALOGUE_FONT_SIZE)
+	group_say_button.size_flags_vertical = Control.SIZE_SHRINK_END
 	group_say_button.pressed.connect(_send_group_line)
 	hbox.add_child(group_say_button)
 
@@ -2369,6 +2469,9 @@ func open_dialogue(character_id: String) -> void:
 			_append_transcript_entry(entry)
 	dialogue_status_label.text = ""
 	dialogue_input.editable = true
+	# An unsent draft survives closing the panel, so re-measure rather than
+	# assuming the box is empty.
+	_fit_input_height(dialogue_input)
 	dialogue_ask_button.disabled = false
 	dialogue_panel.visible = true
 	player.set_mouse_captured(false)
@@ -2420,6 +2523,7 @@ func open_group_dialogue() -> void:
 	group_log.clear()
 	group_status_label.text = ""
 	group_input.editable = true
+	_fit_input_height(group_input)
 	group_say_button.disabled = false
 	group_panel.visible = true
 	player.set_mouse_captured(false)
@@ -2593,6 +2697,9 @@ func _send_group_line() -> void:
 	if gc.state != "awaiting_player":
 		return
 	group_input.text = ""
+	# See _send_question: a programmatic .text assignment does not fire
+	# text_changed, so the box has to be collapsed by hand.
+	_fit_input_height(group_input)
 
 	# Checked BEFORE command parsing, deliberately. "(Marcus, I hand you the
 	# letter)" contains a leading name and would otherwise be read as an order
@@ -2742,6 +2849,9 @@ func _send_question() -> void:
 	if q == "" or current_dialogue_character == "":
 		return
 	dialogue_input.text = ""
+	# Assigning .text in code does not emit text_changed, so without this the box
+	# would stay three rows tall while showing nothing.
+	_fit_input_height(dialogue_input)
 
 	# "Go to the library" / "wait in the study" etc. are handled locally as
 	# stage directions rather than sent to Ollama as an in-character question.

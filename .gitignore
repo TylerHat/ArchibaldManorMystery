@@ -12,3 +12,14 @@ Thumbs.db
 # Godot exported builds (if you ever export to a folder inside the project)
 /builds/
 /export/
+TrainingData/
+Training/__pycache__/
+sft.jsonl
+dpo.jsonl
+dpo_needs_chosen.jsonl
+eval_report.md
+
+# Training playbook - local reference, deliberately not on GitHub
+Training/PLAYBOOK.md
+Training/RUNS.md
+Training/Manual/
