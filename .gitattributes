@@ -1,0 +1,15 @@
+# Git stores text as LF and converts on the way in, so a CRLF working tree on
+# Windows stops showing up as a whole-repo diff. Without this, 65 files and
+# ~17,000 lines of pure line-ending churn drowned out 9 files of real changes.
+* text=auto
+
+# Godot and Blender assets are binary; never touch them.
+*.png binary
+*.jpg binary
+*.blend binary
+*.glb binary
+*.gltf binary
+*.ttf binary
+*.wav binary
+*.ogg binary
+*.gguf binary
