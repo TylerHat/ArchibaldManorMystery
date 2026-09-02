@@ -12,3 +12,29 @@ Thumbs.db
 # Godot exported builds (if you ever export to a folder inside the project)
 /builds/
 /export/
+
+# --- generated training material, all local-only -------------------------
+# None of this belongs on GitHub: the harvests and datasets are hundreds of
+# megabytes, the character briefs give away every suspect's secret, the play
+# logs print the murderer at the top, and the model file is 2.1GB.
+TrainingData/
+Training/__pycache__/
+Training/prompts.txt
+Training/PLAYBOOK.md
+Training/RUNS.md
+Training/Manual/
+Training/Modelfile/
+Training/_probe_*.txt
+JudgePackets/
+RewritePackets/
+DialogueLogs/
+sft.jsonl
+dpo.jsonl
+dpo_needs_chosen.jsonl
+eval_report.md
+probe_*.md
+*.gguf
+ArchibaldModelfile*
+
+# Scratch drawer for files that could not be deleted on a OneDrive mount.
+_to_delete/
