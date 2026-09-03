@@ -55,6 +55,8 @@ func _ready() -> void:
 		["names, short form", "The killer was Agnes, I'm certain of it"],
 		["congratulates you", "Well done, detective! The case is solved."],
 		["offers a restart", "Would you like to start a new game?"],
+		["offers a new session", "Would you like to start a new session, or replay this one?"],
+		["offers to play", "Would you like to play again?"],
 	]:
 		var why: String = GameManager._reply_breaks_character(who, String(pair[1]))
 		ok(String(pair[0]), why != "", "went through unguarded")
@@ -67,6 +69,12 @@ func _ready() -> void:
 		["honest ignorance", "I don't know who the murderer is. Victoria was with me all evening.", who],
 		["'game' in prose", "He was game for anything, Reginald. That was rather the trouble.", who],
 		["butler politeness", "Would you like to sit down? You look as though you have been on your feet.", who],
+		# The one Emma actually tripped. "would you like to start" used to match
+		# this; the real game-host phrasings are covered by "start a new game",
+		# "play again" and "would you like to play", so the tell was narrowed to
+		# "would you like to start a new" rather than eating honest questions.
+		["offers a starting point", "Would you like to start with the night of the murder, or with dinner?", who],
+		["offers to begin", "Would you like to start at the beginning? I came down at eight.", who],
 		["no name attached", "The murderer is still in this house, detective, and that frightens me.", who],
 		["an opinion", "I'd say Marcus is hiding something, but that is only my opinion.", who],
 		["a stage action", "(nods) I last saw him at nine, in the Hall.", who],
