@@ -2883,7 +2883,10 @@ func _on_ollama_response(character_id: String, _text: String) -> void:
 	# Dialogue can't actually be open at the same time as the Notes panel
 	# (opening Notes releases the mouse, which disables interaction), but
 	# keep this in sync just in case that ever changes.
-	if notes_panel.visible and notes_selected_char == character_id:
+	# Null as well as hidden: see the note on _on_summary_ready. The branch above
+	# needs no such check - current_dialogue_character can only be non-empty once
+	# open_dialogue() has run, which cannot happen before _build_ui().
+	if notes_panel != null and notes_panel.visible and notes_selected_char == character_id:
 		_render_notes_content(character_id)
 
 
@@ -3067,9 +3070,15 @@ func _has_slipup_flag(id: String) -> bool:
 	return true
 
 
+## GameManager is an autoload, so it outlives the scene. On a "Play Again"
+## reload _ready() reconnects these signals immediately, but _build_ui() does
+## not run until the player has finished with the suspect-selection screen - so
+## a summary or a reply still in flight from the PREVIOUS case can land in that
+## window, with every panel still null. Same reasoning as the group handlers
+## further up, which null-check group_panel for exactly this.
 func _on_summary_ready(character_id: String, _text: String) -> void:
 	_pending_summaries.erase(character_id)
-	if not notes_panel.visible:
+	if notes_panel == null or not notes_panel.visible:
 		return
 	_update_notes_tab_styles() # refreshes that suspect's slipup flag dot
 	if notes_selected_char == character_id:
@@ -3078,7 +3087,7 @@ func _on_summary_ready(character_id: String, _text: String) -> void:
 
 func _on_summary_error(character_id: String, _message: String) -> void:
 	_pending_summaries.erase(character_id)
-	if not notes_panel.visible:
+	if notes_panel == null or not notes_panel.visible:
 		return
 	_update_notes_tab_styles()
 	if notes_selected_char == character_id:
