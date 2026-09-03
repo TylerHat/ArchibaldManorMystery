@@ -364,3 +364,13 @@ completely unaffected by this scene.
   (randomized weapon/time each game) used only to give the murderer
   something specific to protect - the win condition only checks *who*, not
   weapon or room.
+
+## The model
+
+The game talks to a local Ollama model named `archibald-suspect:v1`, which is a
+fine-tune of `huihui_ai/llama3.2-abliterate:3b` on replies captured from play.
+It is built locally and not distributed here - the file is 2.1GB.
+
+To run against the stock model instead, change `OLLAMA_MODEL` in
+`scripts/GameManager.gd` back to `huihui_ai/llama3.2-abliterate:3b`. The line
+above it is commented out and ready.
