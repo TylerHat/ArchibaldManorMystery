@@ -1,0 +1,460 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Harvest Review</title>
+<style>
+:root{
+  --paper:#EFF1F0; --surface:#FAFBFA; --surface-2:#E5E9E7;
+  --ink:#12171A; --ink-2:#4B5558; --ink-3:#778285;
+  --rule:#D0D7D4; --rule-soft:#DFE4E2;
+  --accent:#1B6A5E; --accent-soft:#D9E8E4;
+  --flag:#8A2F2A; --flag-soft:#F0DEDC;
+  --amber:#8A6410; --amber-soft:#F0E6CE;
+  --f-display:"Archivo","Segoe UI",Helvetica,Arial,sans-serif;
+  --f-body:"Source Serif 4",Georgia,"Times New Roman",serif;
+  --f-mono:ui-monospace,"Cascadia Mono",Consolas,monospace;
+}
+@media (prefers-color-scheme:dark){:root{
+  --paper:#0D1112; --surface:#151A1B; --surface-2:#1D2425;
+  --ink:#E7ECEA; --ink-2:#9DA9A6; --ink-3:#788582;
+  --rule:#2A3233; --rule-soft:#232A2B;
+  --accent:#57C3AC; --accent-soft:#14312C;
+  --flag:#E4837A; --flag-soft:#331D1B;
+  --amber:#D6A94F; --amber-soft:#2E2717;
+}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--ink);font-family:var(--f-body);
+  font-size:17px;line-height:1.55;-webkit-font-smoothing:antialiased}
+.wrap{max-width:52rem;margin:0 auto;padding:0 1.5rem 4rem}
+h1{font-family:var(--f-display);font-weight:800;font-size:2rem;letter-spacing:-.02em;
+  margin:1.6rem 0 .3rem}
+.sub{color:var(--ink-2);margin:0 0 1.2rem;font-size:1rem}
+code,.mono{font-family:var(--f-mono);font-size:.85em}
+button{font:inherit;cursor:pointer}
+
+/* drop */
+#drop{border:2px dashed var(--rule);border-radius:6px;padding:3rem 2rem;text-align:center;
+  background:var(--surface);margin:1rem 0}
+#drop.over{border-color:var(--accent);background:var(--accent-soft)}
+#drop p{margin:.3rem 0;color:var(--ink-2)}
+#drop b{color:var(--ink);font-family:var(--f-display);font-size:1.1rem}
+.pick{display:inline-block;margin-top:.9rem;padding:.5rem .9rem;border:1px solid var(--accent);
+  border-radius:3px;color:var(--accent);background:var(--accent-soft);font-family:var(--f-mono);
+  font-size:.82rem}
+input[type=file]{display:none}
+
+/* bar */
+.bar{position:sticky;top:0;z-index:9;background:var(--paper);border-bottom:1px solid var(--rule);
+  padding:.6rem 0;margin-bottom:1rem}
+.stats{display:flex;flex-wrap:wrap;gap:.35rem;align-items:center;font-family:var(--f-mono);
+  font-size:.74rem}
+.stats span{padding:.25rem .5rem;border:1px solid var(--rule);border-radius:2px;
+  background:var(--surface);color:var(--ink-2)}
+.stats .good{color:var(--accent);border-color:var(--accent);background:var(--accent-soft)}
+.stats .bad{color:var(--flag);border-color:var(--flag);background:var(--flag-soft)}
+.stats button{padding:.25rem .5rem;border:1px solid var(--rule);border-radius:2px;
+  background:var(--surface);color:var(--ink-2);font-family:var(--f-mono);font-size:.74rem}
+.stats button:hover{border-color:var(--accent);color:var(--accent)}
+.prog{height:4px;background:var(--surface-2);border-radius:2px;margin-top:.5rem;overflow:hidden}
+.prog i{display:block;height:100%;background:var(--accent);transition:width .15s}
+
+/* card */
+.meta{font-family:var(--f-mono);font-size:.72rem;color:var(--ink-3);
+  display:flex;flex-wrap:wrap;gap:.3rem .9rem;margin-bottom:.5rem}
+.meta b{color:var(--accent);font-weight:600}
+.ctx{border-left:2px solid var(--rule);padding:.1rem 0 .1rem .8rem;margin:0 0 1rem;
+  color:var(--ink-3);font-size:.88rem}
+.ctx div{margin:.25rem 0}
+.ctx .q{color:var(--ink-2)}
+.ctxtoggle{font-family:var(--f-mono);font-size:.7rem;color:var(--ink-3);background:none;
+  border:0;padding:0 0 .4rem;text-decoration:underline}
+.q-main{font-family:var(--f-display);font-weight:700;font-size:1.22rem;line-height:1.28;
+  letter-spacing:-.01em;margin:.2rem 0 1rem}
+.reply{border:1px solid var(--rule);border-radius:4px;background:var(--surface);
+  padding:.9rem 1.05rem;margin:.6rem 0;white-space:pre-wrap}
+.reply.flagged{border-color:var(--flag)}
+.cand{display:grid;grid-template-columns:2rem 1fr;gap:.8rem;align-items:start;
+  border:1px solid var(--rule);border-radius:4px;background:var(--surface);
+  padding:.8rem 1rem;margin:.5rem 0;cursor:pointer;white-space:pre-wrap;text-align:left;
+  width:100%;color:inherit;font-family:var(--f-body);font-size:1rem;line-height:1.5}
+.cand:hover{border-color:var(--accent);background:var(--accent-soft)}
+.cand .n{font-family:var(--f-mono);font-weight:600;color:var(--accent);font-size:.85rem}
+.cand.flagged{border-color:var(--flag)}
+.cand.flagged .n{color:var(--flag)}
+.rej{border:1px solid var(--flag);background:var(--flag-soft);border-radius:4px;
+  padding:.7rem 1rem;margin:.6rem 0;white-space:pre-wrap;font-size:.95rem}
+.rej .lbl,.flags .lbl{font-family:var(--f-mono);font-size:.63rem;font-weight:600;
+  letter-spacing:.13em;text-transform:uppercase;color:var(--flag);display:block;margin-bottom:.25rem}
+.flags{margin:.4rem 0 0;font-family:var(--f-mono);font-size:.72rem;color:var(--flag)}
+.flags span{display:inline-block;border:1px solid var(--flag);background:var(--flag-soft);
+  border-radius:2px;padding:.1rem .35rem;margin:.15rem .2rem 0 0}
+.keys{display:flex;flex-wrap:wrap;gap:.4rem;margin-top:1.2rem}
+.keys button{padding:.5rem .85rem;border:1px solid var(--rule);border-radius:3px;
+  background:var(--surface);color:var(--ink-2);font-family:var(--f-mono);font-size:.78rem}
+.keys button:hover{border-color:var(--accent);color:var(--accent)}
+.keys button.g{border-color:var(--accent);color:var(--accent);background:var(--accent-soft)}
+.keys button.b{border-color:var(--flag);color:var(--flag);background:var(--flag-soft)}
+kbd{font-family:var(--f-mono);font-size:.85em;border:1px solid currentColor;border-radius:2px;
+  padding:0 .25em;opacity:.75}
+.rec{border:1px solid var(--accent);border-radius:4px;background:var(--accent-soft);
+  padding:.7rem .9rem;margin:.6rem 0}
+.rec.rej{border-color:var(--amber);background:var(--amber-soft)}
+.rec.low{border-style:dashed}
+.rec .rl{font-family:var(--f-mono);font-size:.63rem;font-weight:600;letter-spacing:.12em;
+  text-transform:uppercase;color:var(--accent);display:flex;gap:.5rem;align-items:center;
+  margin-bottom:.3rem}
+.rec.rej .rl{color:var(--amber)}
+.rec .why{font-size:.92rem;color:var(--ink-2);margin:0}
+.rec .sug{margin:.55rem 0 0;padding:.6rem .8rem;background:var(--surface);
+  border:1px solid var(--rule);border-radius:3px;white-space:pre-wrap;font-size:.98rem}
+.rec .sl{font-family:var(--f-mono);font-size:.6rem;letter-spacing:.12em;text-transform:uppercase;
+  color:var(--ink-3);display:block;margin-bottom:.2rem}
+.rec .warn{font-family:var(--f-mono);font-size:.68rem;color:var(--flag);margin-top:.4rem}
+.note{border-left:3px solid var(--amber);background:var(--amber-soft);padding:.75rem .95rem;
+  margin:1.1rem 0;border-radius:0 3px 3px 0;font-size:.92rem}
+.note b{display:block;font-family:var(--f-mono);font-size:.64rem;letter-spacing:.13em;
+  text-transform:uppercase;color:var(--amber);margin-bottom:.25rem}
+.done{text-align:center;padding:3rem 1rem}
+.done h2{font-family:var(--f-display);font-size:1.6rem;margin:0 0 .5rem}
+.hide{display:none}
+.legend{font-size:.84rem;color:var(--ink-3);margin-top:1.5rem;border-top:1px solid var(--rule);
+  padding-top:.9rem}
+.legend code{color:var(--accent)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>Harvest Review</h1>
+<p class="sub">Drop a harvest file in, judge the replies, download the decisions. Nothing leaves your machine.</p>
+
+<div id="filewarn" class="note hide" style="border-left-color:var(--amber);background:var(--amber-soft)">
+  <b>You opened this as a file, so the download button is blocked</b>
+  Chrome treats every <code>file://</code> page as its own locked-down origin, so it will
+  not let a local page save a file. Everything else works, and when you save you will get
+  a copy-and-paste box instead.
+  <br><br>To get the download button back, run this in PowerShell from your project folder:
+  <br><code class="mono">python -m http.server 8000</code>
+  <br>then open <code class="mono">http://localhost:8000/Training/review.html</code>
+</div>
+
+<div id="drop">
+  <p><b>Drop harvest_*.jsonl here</b></p>
+  <p>or</p>
+  <label class="pick">choose a file<input type="file" id="file" accept=".jsonl,.json"></label>
+  <p style="margin-top:1rem;font-size:.85rem">Pass 1 files ask good or bad. Pass 2 files ask you to pick the best of several.</p>
+</div>
+
+<div id="app" class="hide">
+  <div class="bar">
+    <div class="stats">
+      <span id="pos">0 / 0</span>
+      <span class="good" id="ngood">0 good</span>
+      <span class="bad" id="nbad">0 bad</span>
+      <span id="nskip">0 skipped</span>
+      <span id="mode"></span>
+      <span id="agree" class="hide"></span>
+      <button id="bulkaccept" class="hide">accept all remaining recommendations</button>
+      <button id="bulk">reject all flagged</button>
+      <button id="save">download decisions</button>
+      <button id="reset">start over</button>
+    </div>
+    <div class="prog"><i id="pbar" style="width:0"></i></div>
+  </div>
+  <div id="card"></div>
+</div>
+
+<div class="legend" id="legend">
+  <p><b>Groups:</b> <code>alibi</code> and <code>house</code> are the regression baseline, keep the ones that read naturally.
+  <code>trait</code> and <code>secret</code> are where character distinctiveness lives, and a bland reply here is worth rejecting
+  even when nothing is technically wrong with it. <code>pressure</code> tests whether it refuses: a suspect refusing in character
+  is good, a model refusing is not. <code>frame</code> tests whether it stays inside the fiction.</p>
+  <p><b>Do not reject</b> a suspect for lying, being rude, or being brief. Suspects lie, that is the game.</p>
+</div>
+
+</div>
+
+<script>
+(function(){
+  var rows=[], i=0, mode="binary", verdicts={}, picks={}, rewrites={},
+      agreed=0, overruled=0, srcName="", showCtx=false;
+  var el=function(id){return document.getElementById(id)};
+
+  function store(){ try{ localStorage.setItem("hr:"+srcName,
+      JSON.stringify({i:i,verdicts:verdicts,picks:picks,rewrites:rewrites,agreed:agreed,overruled:overruled})); }catch(e){} }
+  function restore(){ try{ var r=localStorage.getItem("hr:"+srcName); if(!r) return;
+      var d=JSON.parse(r); i=d.i||0; verdicts=d.verdicts||{}; picks=d.picks||{};
+      rewrites=d.rewrites||{}; agreed=d.agreed||0; overruled=d.overruled||0;
+    }catch(e){} }
+
+  function esc(s){ return String(s).replace(/[&<>]/g,function(c){
+    return {"&":"&amp;","<":"&lt;",">":"&gt;"}[c]; }); }
+
+  function load(text, name){
+    srcName=name; rows=[];
+    text.split("\n").forEach(function(l){
+      l=l.trim(); if(!l) return;
+      try{ rows.push(JSON.parse(l)); }catch(e){}
+    });
+    if(!rows.length){ alert("No readable rows in that file."); return; }
+    mode = rows.some(function(r){return r.rejected_original!==undefined}) ? "pick" : "binary";
+    verdicts={}; picks={}; rewrites={}; agreed=0; overruled=0; i=0; restore();
+    el("drop").classList.add("hide"); el("app").classList.remove("hide");
+    el("mode").textContent = mode==="pick" ? "pass 2: pick the best" : "pass 1: good or bad";
+    render();
+  }
+
+  function counts(){
+    var g=0,b=0,s=0,r=0;
+    Object.keys(verdicts).forEach(function(k){
+      var v=verdicts[k];
+      if(v==="good") g++; else if(v==="bad") b++;
+      else if(v==="skip") s++; else if(v==="rewrite"||v==="picked") r++;
+    });
+    return {g:g,b:b,s:s,r:r};
+  }
+
+  function ctxHtml(r){
+    var m=r.messages||[], out=[];
+    for(var j=Math.max(1,m.length-5); j<m.length-1; j++){
+      var role=m[j].role==="user"?"Detective":r.character||"Suspect";
+      out.push('<div class="'+(m[j].role==="user"?"q":"")+'"><b>'+esc(role)+':</b> '+
+               esc(String(m[j].content).slice(0,220))+'</div>');
+    }
+    if(!out.length) return '<div class="ctx"><div>First question of this conversation.</div></div>';
+    return '<div class="ctx">'+out.join("")+'</div>';
+  }
+
+  function flagsHtml(f){
+    if(!f||!f.length) return "";
+    return '<div class="flags">'+f.map(function(x){return "<span>"+esc(x)+"</span>"}).join("")+'</div>';
+  }
+
+  function render(){
+    var c=counts();
+    el("pos").textContent=(i+1)+" / "+rows.length;
+    el("ngood").textContent=c.g+" good";
+    el("nbad").textContent=c.b+" bad";
+    el("nskip").textContent=c.s+" skipped"+(c.r?"  |  "+c.r+" paired":"");
+    el("pbar").style.width=(100*(c.g+c.b+c.s+c.r)/rows.length)+"%";
+    var hasRec=rows.some(function(x){return x.recommendation});
+    el("bulkaccept").classList.toggle("hide", !hasRec);
+    var ag=el("agree");
+    ag.classList.toggle("hide", !(agreed+overruled));
+    if(agreed+overruled){
+      var pct=Math.round(100*agreed/(agreed+overruled));
+      ag.textContent="agreed with Claude "+pct+"% ("+agreed+" / "+(agreed+overruled)+")";
+    }
+    store();
+
+    if(i>=rows.length){
+      var tail = c.b
+        ? '<p>Download the decisions, then re-ask the '+c.b+' you rejected with no rewrite:</p>'+
+          '<p class="mono">python Training/harvest.py --rerun decisions.json --k 3</p>'
+        : '<p>Nothing left needing a rerun. Download and go straight to:</p>'+
+          '<p class="mono">python Training/harvest_to_dataset.py decisions.json</p>';
+      el("card").innerHTML='<div class="done"><h2>All '+rows.length+' reviewed</h2>'+
+        '<p>'+c.g+' good, '+c.b+' bad, '+c.r+' already paired, '+c.s+' skipped.</p>'+tail+'</div>';
+      return;
+    }
+    var r=rows[i], h="";
+    h+='<div class="meta"><b>'+esc(r.character||r.character_id)+'</b>'+
+       '<span>'+esc(r.group)+'</span><span>depth '+(r.depth||"?")+'</span>'+
+       '<span>'+esc(r.id)+'</span></div>';
+    h+='<button class="ctxtoggle" id="ctxbtn">'+(showCtx?"hide":"show")+' the conversation so far</button>';
+    if(showCtx) h+=ctxHtml(r);
+    h+='<div class="q-main">'+esc(r.question)+'</div>';
+
+    var rec=r.recommendation;
+    if(rec){
+      var isRej = rec.verdict==="reject";
+      h+='<div class="rec'+(isRej?" rej":"")+(rec.confidence==="low"?" low":"")+'">'+
+         '<div class="rl"><span>Claude says: '+(isRej?"reject":"keep")+'</span>'+
+         (rec.confidence==="low"?'<span>not confident, look closely</span>':'')+'</div>'+
+         '<p class="why">'+esc(rec.reason||"")+'</p>'+
+         (rec.suggested ? '<div class="sug"><span class="sl">suggested instead</span>'+
+                          esc(rec.suggested)+'</div>' : '')+
+         (isRej && !rec.suggested ? '<p class="warn">no rewrite offered, this one goes to pass 2</p>' : '')+
+         '</div>';
+    }
+
+    if(mode==="pick"){
+      h+='<div class="rej"><span class="lbl">you marked this one bad</span>'+esc(r.rejected_original)+'</div>';
+      r.candidates.forEach(function(c2,n){
+        h+='<button class="cand'+(c2.flags&&c2.flags.length?" flagged":"")+'" data-pick="'+n+'">'+
+           '<span class="n">'+(n+1)+'</span><span>'+esc(c2.text)+flagsHtml(c2.flags)+'</span></button>';
+      });
+      h+='<div class="keys">'+
+         r.candidates.map(function(c2,n){return '<button data-pick="'+n+'" class="g"><kbd>'+(n+1)+'</kbd> pick this</button>'}).join("")+
+         '<button data-act="allbad" class="b"><kbd>x</kbd> all bad, discard</button>'+
+         '<button data-act="skip"><kbd>space</kbd> skip</button>'+
+         '<button data-act="undo"><kbd>u</kbd> back</button></div>';
+    } else {
+      var c0=r.candidates[0];
+      h+='<div class="reply'+(c0.flags&&c0.flags.length?" flagged":"")+'">'+esc(c0.text)+flagsHtml(c0.flags)+'</div>';
+      h+='<div class="keys">'+
+         (rec ? '<button data-act="accept" class="g"><kbd>a</kbd> accept Claude</button>' : '')+
+         '<button data-act="good"'+(rec?'':' class="g"')+'><kbd>j</kbd> good</button>'+
+         '<button data-act="bad" class="b"><kbd>k</kbd> bad</button>'+
+         '<button data-act="skip"><kbd>space</kbd> skip</button>'+
+         '<button data-act="undo"><kbd>u</kbd> back</button></div>';
+    }
+    if(i===0){
+      h+='<div class="note"><b>Keyboard</b>'+(mode==="pick"
+        ? "Number keys pick a winner. <kbd>x</kbd> discards when all of them are bad, and you should use it rather than picking a least-bad one. Forcing a winner out of several failures teaches a distinction that does not exist."
+        : "<kbd>j</kbd> good, <kbd>k</kbd> bad, <kbd>space</kbd> skip, <kbd>u</kbd> back. Reject bland replies in the trait group even when nothing is technically wrong.")+'</div>';
+    }
+    el("card").innerHTML=h;
+
+    var cb=el("ctxbtn");
+    if(cb) cb.onclick=function(){ showCtx=!showCtx; render(); };
+    [].forEach.call(document.querySelectorAll("[data-pick]"),function(b){
+      b.onclick=function(){ pick(parseInt(b.dataset.pick,10)); };
+    });
+    [].forEach.call(document.querySelectorAll("[data-act]"),function(b){
+      b.onclick=function(){ act(b.dataset.act); };
+    });
+  }
+
+  function pick(n){
+    var r=rows[i]; if(!r||!r.candidates[n]) return;
+    verdicts[r.id]="picked"; picks[r.id]=n; i++; render();
+  }
+  function act(a){
+    var r=rows[i];
+    if(a==="undo"){
+      if(i>0){ i--;
+        var pr=rows[i];
+        if(verdicts[pr.id]==="__agreed") agreed=Math.max(0,agreed-1);
+        delete verdicts[pr.id]; delete picks[pr.id]; delete rewrites[pr.id];
+      }
+      render(); return;
+    }
+    if(!r) return;
+    var rec=r.recommendation;
+
+    if(a==="accept" && rec){
+      if(rec.verdict==="keep"){ verdicts[r.id]="good"; }
+      else if(rec.suggested){ verdicts[r.id]="rewrite"; rewrites[r.id]=rec.suggested; }
+      else { verdicts[r.id]="bad"; }
+      agreed++; i++; render(); return;
+    }
+
+    if(a==="good") verdicts[r.id]="good";
+    else if(a==="bad"||a==="allbad") verdicts[r.id]="bad";
+    else verdicts[r.id]="skip";
+
+    // Overruling is worth counting. If you disagree with the judge often, its
+    // recommendations are costing you time rather than saving it.
+    if(rec && a!=="skip"){
+      var same = (rec.verdict==="keep" && a==="good") ||
+                 (rec.verdict==="reject" && (a==="bad"||a==="allbad"));
+      if(!same) overruled++;
+    }
+    i++; render();
+  }
+
+  document.addEventListener("keydown",function(ev){
+    if(el("app").classList.contains("hide")) return;
+    if(ev.target.tagName==="INPUT") return;
+    var k=ev.key.toLowerCase();
+    if(mode==="pick" && /^[1-9]$/.test(k)){ ev.preventDefault(); pick(parseInt(k,10)-1); return; }
+    if(k==="a"&&mode==="binary"&&rows[i]&&rows[i].recommendation){ ev.preventDefault(); act("accept"); }
+    else if(k==="j"&&mode==="binary"){ ev.preventDefault(); act("good"); }
+    else if(k==="k"&&mode==="binary"){ ev.preventDefault(); act("bad"); }
+    else if(k==="x"&&mode==="pick"){ ev.preventDefault(); act("allbad"); }
+    else if(k===" "){ ev.preventDefault(); act("skip"); }
+    else if(k==="u"){ ev.preventDefault(); act("undo"); }
+    else if(k==="c"){ ev.preventDefault(); showCtx=!showCtx; render(); }
+  });
+
+  el("bulk").onclick=function(){
+    var n=0;
+    rows.forEach(function(r){
+      if(verdicts[r.id]) return;
+      var f=r.candidates[0].flags;
+      if(f&&f.length){ verdicts[r.id]="bad"; n++; }
+    });
+    alert(n+" flagged replies marked bad. The rest still need your eyes.");
+    render();
+  };
+  function fallbackSave(txt){
+    // blob: and data: downloads are both refused from a file:// origin, so the
+    // only thing left that always works is putting the text on the screen.
+    el("card").innerHTML='<div class="done" style="text-align:left">'+
+      '<h2>Copy this into decisions.json</h2>'+
+      '<p>Your browser will not let a page opened as a file save a download. Select all of '+
+      'this, paste it into a new file called <b>decisions.json</b> in your project folder, '+
+      'and carry on. Your verdicts are not lost.</p>'+
+      '<textarea id="dump" readonly style="width:100%;height:16rem;font-family:var(--f-mono);'+
+      'font-size:.72rem;border:1px solid var(--rule);border-radius:4px;padding:.6rem;'+
+      'background:var(--surface);color:var(--ink)"></textarea>'+
+      '<div class="keys"><button id="copyall" class="g">copy to clipboard</button>'+
+      '<button id="backto">back to reviewing</button></div></div>';
+    var ta=el("dump"); ta.value=txt; ta.focus(); ta.select();
+    el("copyall").onclick=function(){
+      ta.select();
+      var done=false;
+      try{ done=document.execCommand("copy"); }catch(e){}
+      el("copyall").textContent = done ? "copied" : "press Ctrl+C now";
+    };
+    el("backto").onclick=render;
+  }
+
+  el("bulkaccept").onclick=function(){
+    if(!confirm("Accept Claude's recommendation on every row you have not judged yourself?\n\n"+
+                "This is fast but it is your dataset. Spot-check a page of them afterwards."))
+      return;
+    var n=0;
+    rows.forEach(function(r){
+      if(verdicts[r.id]) return;
+      var rec=r.recommendation; if(!rec) return;
+      if(rec.verdict==="keep") verdicts[r.id]="good";
+      else if(rec.suggested){ verdicts[r.id]="rewrite"; rewrites[r.id]=rec.suggested; }
+      else verdicts[r.id]="bad";
+      agreed++; n++;
+    });
+    alert(n+" rows accepted.");
+    render();
+  };
+
+  el("save").onclick=function(){
+    var out={source:"TrainingData/"+srcName, mode:mode, saved:new Date().toISOString(),
+             verdicts:verdicts, picks:picks, rewrites:rewrites,
+             judge:{agreed:agreed, overruled:overruled}};
+    var txt=JSON.stringify(out,null,1);
+    if(location.protocol==="file:"){ fallbackSave(txt); return; }
+    try{
+      var b=new Blob([txt],{type:"application/json"});
+      var a=document.createElement("a");
+      a.href=URL.createObjectURL(b); a.download="decisions.json";
+      document.body.appendChild(a); a.click();
+      setTimeout(function(){ document.body.removeChild(a); URL.revokeObjectURL(a.href); },100);
+    }catch(e){ fallbackSave(txt); }
+  };
+  el("reset").onclick=function(){
+    if(!confirm("Clear every verdict for this file?")) return;
+    verdicts={}; picks={}; rewrites={}; agreed=0; overruled=0; i=0; render();
+  };
+
+  if(location.protocol==="file:") el("filewarn").classList.remove("hide");
+
+  var d=el("drop");
+  ["dragenter","dragover"].forEach(function(e){ d.addEventListener(e,function(ev){
+    ev.preventDefault(); d.classList.add("over"); }); });
+  ["dragleave","drop"].forEach(function(e){ d.addEventListener(e,function(ev){
+    ev.preventDefault(); d.classList.remove("over"); }); });
+  d.addEventListener("drop",function(ev){
+    var f=ev.dataTransfer.files[0]; if(!f) return;
+    var rd=new FileReader(); rd.onload=function(){ load(rd.result,f.name); }; rd.readAsText(f);
+  });
+  el("file").addEventListener("change",function(ev){
+    var f=ev.target.files[0]; if(!f) return;
+    var rd=new FileReader(); rd.onload=function(){ load(rd.result,f.name); }; rd.readAsText(f);
+  });
+})();
+</script>
+</body>
+</html>
