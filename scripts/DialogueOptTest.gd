@@ -158,7 +158,8 @@ func _ready() -> void:
 	var body: Dictionary = gm._current_request["body"]
 	ok("keep_alive is set", String(body.get("keep_alive", "")) == "30m")
 	ok("stop sequences present", Array(body["options"]["stop"]).size() > 0)
-	ok("num_predict lowered to 140", int(body["options"]["num_predict"]) == 140)
+	ok("num_predict capped at MAX_RESPONSE_TOKENS",
+		int(body["options"]["num_predict"]) == GameManager.MAX_RESPONSE_TOKENS)
 
 	print("\n%s  (%d failure(s))" % ["ALL CHECKS PASSED" if fails == 0 else "FAILURES", fails])
 	get_tree().quit(1 if fails > 0 else 0)

@@ -34,6 +34,15 @@ const LOG_REPLY_3 := "The killer of Lord Reginald Archibald is... Agnes Thorne, 
 
 var fails := 0
 
+## Any one room from an account, for building a claim that should pass.
+func _first_room(rooms: Dictionary) -> String:
+	for row in CaseGenerator.GRID:
+		for r in row:
+			if rooms.has(String(r).to_lower()):
+				return String(r)
+	return "Hall"
+
+
 func ok(label: String, cond: bool, detail: String = "") -> void:
 	if cond:
 		print("  PASS  %s" % label)
@@ -62,10 +71,14 @@ func _ready() -> void:
 		ok(String(pair[0]), why != "", "went through unguarded")
 
 	print("\n=== 2. replies that must be left alone ===")
+	# The case is generated fresh every run, so an alibi has to be built from
+	# this game's schedule. Naming a room here passed only for as long as
+	# nothing checked whether the speaker had ever been in it.
+	var own_room := _first_room(GameManager._account_rooms(who))
 	# These are the ones that matter. A guard that eats honest answers is worse
 	# than no guard, because the failure is invisible and reads as a bad model.
 	for pair2 in [
-		["plain alibi", "I was in the Conservatory on my own from nine until eleven.", who],
+		["plain alibi", "I was in the %s on my own from nine until eleven." % own_room, who],
 		["honest ignorance", "I don't know who the murderer is. Victoria was with me all evening.", who],
 		["'game' in prose", "He was game for anything, Reginald. That was rather the trouble.", who],
 		["butler politeness", "Would you like to sit down? You look as though you have been on your feet.", who],
@@ -122,6 +135,81 @@ func _ready() -> void:
 		common += 1
 	ok("shared prefix still byte-identical", common >= pre.length(),
 		"diverges at %d, preamble is %d" % [common, pre.length()])
+
+	print("\n=== 6. facts the case owns ===")
+	# Every rule here is already written in the system prompt in plain English.
+	# They are enforced in code because archibald-suspect:v1 broke all of them in
+	# one playthrough: see claude/dialogue-audit-2026-09-03.md.
+
+	# The case is generated fresh each run, so nothing below hard-codes a room or
+	# a weapon. A test that assumes the Ballroom passes four games in five and
+	# then fails for reasons that have nothing to do with the guard.
+	var mine: Dictionary = GameManager._account_rooms(who)
+	var elsewhere := ""
+	for row in CaseGenerator.GRID:
+		for r in row:
+			if elsewhere == "" and not mine.has(String(r).to_lower()):
+				elsewhere = String(r)
+	ok("found a room they were never in", elsewhere != "", "account covers the whole house")
+
+	var absent_weapon := ""
+	for w in GameManager.IMPOSSIBLE_WEAPONS:
+		if absent_weapon == "" and GameManager.murder_weapon.to_lower().find(String(w)) == -1:
+			absent_weapon = String(w)
+
+	for bad in [
+		["denies the murder", "He died of natural causes, detective. I am quite sure of it.", who, false],
+		["offers a heart attack", "It was a heart attack. There is nothing more to it.", who, false],
+		["a weapon not in the case", "I have seen her with the %s before." % absent_weapon, who, false],
+		["a person who does not exist", "The coachman was in the passage, he will tell you.", who, false],
+		["another guest in the room", "You should be worried about the gentleman at your back.", who, false],
+		["a room they were never in", "I was in the %s from nine until ten." % elsewhere, who, false],
+	]:
+		var why3: String = GameManager._reply_breaks_character(
+			String(bad[2]), String(bad[1]), bool(bad[3]))
+		ok(String(bad[0]), why3 != "", "went through unguarded")
+
+	print("\n=== 7. and the honest versions of the same lines ===")
+	# The half that matters. Each of these is one word away from a rejection
+	# above, and every one of them is a suspect answering correctly.
+	for good in [
+		# Denying a room you were never in is the right answer, not a claim.
+		["denies a room", "I was not in the %s at any point last night." % elsewhere, who, false],
+		["never went there", "I never went in the %s, detective." % elsewhere, who, false],
+		# thorne's own secret is about her mother, so she must be able to say it.
+		["a relative in their own brief", "My mother is buried on the south lawn.", "thorne", false],
+		# cross_eugene is the butler, so a butler is a person in this house.
+		["a job somebody actually holds", "The butler was clearing the table when I came through.", who, false],
+		# The other guests really are standing there in a Hall meetup.
+		["in the hall, where they are present", "Ask the gentleman at your back, he saw it too.", who, true],
+		["an ordinary alibi", "I was in the %s until eleven, on my own." % _first_room(mine), who, false],
+		# The murderer's claimed path does not contain the murder room, so a
+		# room guard built on the claim alone would reject the confession.
+		["the murderer confessing", "I was in the %s. I killed him." % GameManager.murder_room.replace("the ", ""),
+			GameManager.murderer_id, false],
+	]:
+		var why4: String = GameManager._reply_breaks_character(
+			String(good[2]), String(good[1]), bool(good[3]))
+		ok(String(good[0]), why4 == "", "caught as: " + why4)
+
+	print("\n=== 8. the new prompt rules are in place ===")
+	var pre2: String = GameManager._shared_case_preamble()
+	for needle2 in ["HE WAS KILLED, AND THAT IS SETTLED", "ONE short physical action",
+			"Never write what the detective does", "Never \"the Lord Archibald\""]:
+		ok(String(needle2) + " present", pre2.find(String(needle2)) != -1)
+	var tail: String = GameManager._build_system_prompt(who)
+	ok("schedule says last night", tail.find("Every time on that list is LAST NIGHT") != -1)
+
+	var innocent := ""
+	for c in GameManager.active_characters():
+		if innocent == "" and String(c["id"]) != GameManager.murderer_id:
+			innocent = String(c["id"])
+	var innocent_tail: String = GameManager._build_system_prompt(innocent)
+	ok("secret is gated for an innocent",
+		innocent_tail.find("YOUR SECRET IS YOURS TO KEEP") != -1)
+	var guilty_tail: String = GameManager._build_system_prompt(GameManager.murderer_id)
+	ok("the murderer keeps their lie instead",
+		guilty_tail.find("THE ONE THING YOU LIE ABOUT") != -1)
 
 	if RUN_LIVE:
 		await _live_attack()
