@@ -6,6 +6,7 @@ extends Node
 # and checks the player's final accusation at the front door.
 
 const DialogueLogScript = preload("res://Scripts/DialogueLog.gd")
+const TrainingCaptureScript = preload("res://Scripts/TrainingCapture.gd")
 
 ## Development shortcuts: Ctrl+1 for the murderer and the full schedule table,
 ## Ctrl+2 to dump the next hall prompt. Set false before exporting a build - the
@@ -370,6 +371,22 @@ var debug_dump_group: bool = false
 var dialogue_log_enabled: bool = false
 var dialogue_log_path: String = "" # res:// or user:// path for this session, "" when off
 
+## Fine-tuning capture. Rides along with the dialogue log rather than getting a
+## checkbox of its own: the sessions worth capturing are exactly the sessions
+## worth logging, and one switch is one thing to forget rather than two.
+var training_sft_path: String = ""  # "" when capture is off
+var training_dpo_path: String = ""
+## A guard-caught reply, held until its retry lands so the two can be written as
+## a preference pair. Keyed by character, because a hall meetup can have several
+## requests in flight at once.
+var _training_pending: Dictionary = {}
+## The reply currently on screen and the prompt that produced it, so F9 and F10
+## have something to label. Cleared on use, so a double tap cannot write twice.
+var _training_last: Dictionary = {}
+var _training_sft_count: int = 0
+var _training_dpo_count: int = 0
+var _training_auto_count: int = 0
+
 ## Seed for this playthrough's case. Set from the selection screen to replay a
 ## specific mystery; 0 means "pick a fresh one". Kept small (under a million)
 ## purely so the shareable code is short enough to read aloud or type from a
@@ -481,6 +498,15 @@ func _setup_input_map() -> void:
 	if DEBUG_KEYS:
 		_add_key_action("toggle_debug", KEY_1, true)
 		_add_key_action("toggle_prompt_dump", KEY_2, true)
+		# Unmodified, unlike the two above, because these get pressed constantly
+		# during a data-gathering session and Ctrl+F9 four hundred times is a
+		# different experience to F9 four hundred times. Nothing else in the game
+		# reads the function keys.
+		_add_key_action("training_keep", KEY_F9)
+		_add_key_action("training_reject", KEY_F10)
+		# Ctrl-modified like the other two dev dumps, because it is pressed once
+		# per case rather than constantly.
+		_add_key_action("export_prompts", KEY_3, true)
 
 
 func _add_key_action(action_name: String, keycode: int, ctrl: bool = false) -> void:
@@ -588,6 +614,21 @@ func start_new_game(character_ids: Array = []) -> void:
 			dialogue_log_path = ""
 		else:
 			print("[DEBUG] Dialogue log for this session: %s" % written)
+
+	training_sft_path = ""
+	training_dpo_path = ""
+	_training_pending.clear()
+	_training_last = {}
+	_training_sft_count = 0
+	_training_dpo_count = 0
+	_training_auto_count = 0
+	if dialogue_log_enabled:
+		var paths := TrainingCaptureScript.new_session_paths()
+		training_sft_path = String(paths["sft"])
+		training_dpo_path = String(paths["dpo"])
+		print("[Training] capture ON. F9 keeps a reply, F10 rejects it, the guard pairs itself.")
+		print("[Training] %s" % ProjectSettings.globalize_path(training_sft_path))
+		print("[Training] %s" % ProjectSettings.globalize_path(training_dpo_path))
 
 
 func get_character(id: String) -> Dictionary:
@@ -1449,6 +1490,183 @@ func _refresh_dialogue_log() -> String:
 	return DialogueLogScript.write(self, dialogue_log_path)
 
 
+# ------------------------------------------------------- training capture --
+#
+# The point of collecting this during play rather than writing it by hand is
+# that a failure the model actually produced is worth several a person invented.
+# The guard is already finding those failures in order to hide them from the
+# player; all that is added here is keeping them.
+
+
+func _training_active() -> bool:
+	return training_dpo_path != "" or training_sft_path != ""
+
+
+## Holds a guard-caught reply until its retry comes back.
+##
+## The prompt stored is the one that was actually sent, never the retry's: a
+## retry carries an extra corrective system message that will not exist at play
+## time, and training on it would teach the model to expect a correction it is
+## never going to get.
+func _training_stash_reject(id: String, sent: Array, bad: String, reason: String) -> void:
+	if not _training_active():
+		return
+	_training_pending[id] = {"messages": sent.duplicate(true), "rejected": bad, "reason": reason}
+
+
+## The retry came back clean, so the pair is complete. Returns the original
+## prompt so the caller can label the retry against it rather than against the
+## corrected one; empty when there was nothing pending.
+func _training_commit_pair(id: String, good: String) -> Array:
+	if not _training_active() or not _training_pending.has(id):
+		return []
+	var p: Dictionary = _training_pending[id]
+	_training_pending.erase(id)
+	var original: Array = p["messages"]
+	var row := TrainingCaptureScript.dpo_row(original, good, String(p["rejected"]), {
+		"source": "guard", "reason": String(p["reason"]), "character_id": id, "scene": "private",
+	})
+	if TrainingCaptureScript.append_row(training_dpo_path, row):
+		_training_dpo_count += 1
+		_training_auto_count += 1
+		print("[Training] auto pair (%s: %s) -> %d pairs, %d of them free" % [
+			id, String(p["reason"]), _training_dpo_count, _training_auto_count])
+	return original
+
+
+## The retry broke character too, so the substituted line is the canned
+## fallback. That is a dodge rather than an answer and there is nothing in it
+## worth teaching, so the pair is dropped rather than half-written.
+func _training_drop_pair(id: String) -> void:
+	_training_pending.erase(id)
+
+
+## A guard catch with no retry behind it, which is every catch in a hall meetup.
+## Written with an empty `chosen` for a human to fill in later.
+func _training_write_unpaired(id: String, sent: Array, bad: String, reason: String, scene: String) -> void:
+	if not _training_active():
+		return
+	var row := TrainingCaptureScript.dpo_row(sent, "", bad, {
+		"source": "guard", "reason": reason, "character_id": id, "scene": scene,
+	})
+	if TrainingCaptureScript.append_row(training_dpo_path, row):
+		_training_dpo_count += 1
+		print("[Training] guard reject (%s, no retry in the hall) -> %d pairs, needs a 'chosen'" % [
+			id, _training_dpo_count])
+
+
+## Remembers the reply now on screen so F9 or F10 can label it.
+func _training_offer(id: String, sent: Array, reply: String, scene: String) -> void:
+	if not _training_active():
+		return
+	_training_last = {"character_id": id, "messages": sent.duplicate(true), "reply": reply, "scene": scene}
+
+
+## F9 / F10. Keeping writes an imitation example; rejecting writes half a
+## preference pair for the better reply to be written in afterwards.
+##
+## Nothing is captured automatically on the strength of not having been
+## rejected. A fine-tune trained on every reply that happened to pass the guard
+## learns the mediocre ones just as hard as the good ones, and the symptom -
+## every suspect converging on the same flat voice - is only visible after an
+## hour of training. Pressing a key is cheaper than that.
+func training_label_last(keep: bool) -> void:
+	if not _training_active():
+		print("[Training] capture is off. Tick the dialogue log box on the selection screen.")
+		return
+	if _training_last.is_empty():
+		print("[Training] nothing to label yet.")
+		return
+	var last: Dictionary = _training_last
+	_training_last = {}
+	var id := String(last["character_id"])
+	var meta := {"source": "manual", "character_id": id, "scene": String(last["scene"])}
+	if keep:
+		var row := TrainingCaptureScript.sft_row(Array(last["messages"]), String(last["reply"]), meta)
+		if TrainingCaptureScript.append_row(training_sft_path, row):
+			_training_sft_count += 1
+			print("[Training] kept (%s) -> %d good examples" % [id, _training_sft_count])
+	else:
+		var row2 := TrainingCaptureScript.dpo_row(Array(last["messages"]), "", String(last["reply"]), meta)
+		if TrainingCaptureScript.append_row(training_dpo_path, row2):
+			_training_dpo_count += 1
+			print("[Training] rejected (%s) -> %d pairs, write its 'chosen' later" % [id, _training_dpo_count])
+
+
+## Autoloads receive unhandled input after the running scene has had it, so
+## Main.gd keeps first refusal on every key and none of its branches need
+## touching.
+## Writes every active character's system prompt, byte for byte as it sits in
+## their history, to one JSON file. That file is what lets the offline harvester
+## ask these exact characters questions without running the game.
+##
+## Taken from _histories rather than rebuilt with _build_system_prompt(), so
+## what the harvester sends is provably identical to what the game sends. A
+## rebuild would be the same today and is one refactor away from not being.
+##
+## Pinned to the case code: the prompt bakes in this game's murder room, cast
+## and schedule, so an export is only valid for the case it came from. Paste the
+## code on the selection screen to replay the same world.
+func export_system_prompts() -> String:
+	if _histories.is_empty():
+		print("[Export] no game in progress.")
+		return ""
+	var chars := {}
+	for c in active_characters():
+		var id := String(c["id"])
+		if not _histories.has(id) or Array(_histories[id]).is_empty():
+			continue
+		var first: Dictionary = _histories[id][0]
+		if String(first.get("role", "")) != "system":
+			continue
+		chars[id] = {
+			"name": String(c["name"]),
+			"short": String(c["short"]),
+			"job": String(c["job"]),
+			"room": room_for(id),
+			"system": String(first["content"]),
+		}
+	var payload := {
+		"case_code": case_code(),
+		"exported_at": Time.get_datetime_string_from_system(false, true),
+		"model": OLLAMA_MODEL,
+		"num_ctx": OLLAMA_NUM_CTX,
+		"max_response_tokens": MAX_RESPONSE_TOKENS,
+		"stop": STOP_SEQUENCES,
+		"murderer_id": murderer_id,
+		"murder_room": murder_room,
+		"murder_weapon": murder_weapon,
+		"murder_time": murder_time,
+		"characters": chars,
+	}
+	var dir := TrainingCaptureScript._resolve_dir()
+	var path := "%s/prompts_export_%s.json" % [dir, case_code()]
+	var f := FileAccess.open(path, FileAccess.WRITE)
+	if f == null:
+		push_warning("[Export] could not write %s" % path)
+		return ""
+	f.store_string(JSON.stringify(payload, "\t"))
+	f.close()
+	var full := ProjectSettings.globalize_path(path)
+	print("[Export] %d characters -> %s" % [chars.size(), full])
+	print("[Export] case %s. Run a second game with the other suspects to cover the roster." % case_code())
+	return full
+
+
+func _unhandled_input(event: InputEvent) -> void:
+	if not DEBUG_KEYS:
+		return
+	if event.is_action_pressed("export_prompts", false, true):
+		export_system_prompts()
+		get_viewport().set_input_as_handled()
+	elif event.is_action_pressed("training_keep", false, true):
+		training_label_last(true)
+		get_viewport().set_input_as_handled()
+	elif event.is_action_pressed("training_reject", false, true):
+		training_label_last(false)
+		get_viewport().set_input_as_handled()
+
+
 ## Prints one group request's full message list, with each message's distance
 ## from the generation point - the number that actually matters when a suspect
 ## seems to have forgotten something. Roughly 4 characters per token.
@@ -1837,18 +2055,30 @@ func _on_request_completed(result: int, response_code: int, _headers: PackedStri
 
 	if kind == "dialogue":
 		var q := String(item.get("question", ""))
+		var sent_body: Dictionary = item.get("body", {})
+		var sent: Array = sent_body.get("messages", [])
+		var is_retry := bool(item.get("guard_retry", false))
 
 		# Before the append, never after: a reply that has left the fiction must not
 		# become the thing the next reply is conditioned on.
 		var broke := _reply_breaks_character(character_id, content)
 		if broke != "":
 			print("[Guard] %s %s | %s" % [character_id, broke, content.substr(0, 100)])
-			if not bool(item.get("guard_retry", false)):
+			if not is_retry:
+				# Half a preference pair. Held rather than written, because the
+				# other half is whatever the retry comes back with.
+				_training_stash_reject(character_id, sent, content, broke)
 				_retry_in_character(item)
 				_process_queue()
 				return
+			_training_drop_pair(character_id)
 			content = _guard_fallback(character_id)
+		elif is_retry:
+			var original := _training_commit_pair(character_id, content)
+			if not original.is_empty():
+				sent = original
 
+		_training_offer(character_id, sent, content, "private")
 		_histories[character_id].append({"role": "assistant", "content": content})
 		transcript.append({"character_id": character_id, "question": q, "answer": content})
 		_refresh_dialogue_log()
@@ -1867,10 +2097,15 @@ func _on_request_completed(result: int, response_code: int, _headers: PackedStri
 		# Same guard as a private answer, but substituted rather than retried. A hall
 		# line costs one sequential request per attendee already, and a second round
 		# trip for one bad line would be felt.
+		var group_body: Dictionary = item.get("body", {})
+		var group_sent: Array = group_body.get("messages", [])
 		var group_broke := _reply_breaks_character(character_id, spoken)
 		if group_broke != "":
 			print("[Guard] %s (hall) %s | %s" % [character_id, group_broke, spoken.substr(0, 100)])
+			_training_write_unpaired(character_id, group_sent, spoken, group_broke, "group")
 			spoken = _guard_fallback(character_id)
+		else:
+			_training_offer(character_id, group_sent, spoken, "group")
 		# Deliberately NOT appended to _histories. A group line is part of a
 		# scene that GroupChat renders into each turn prompt on demand and
 		# distills into one digest when the room empties, so storing it here too
