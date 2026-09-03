@@ -1086,7 +1086,7 @@ func _build_system_prompt(id: String) -> String:
 const OUT_OF_CHARACTER := [
 	"as an ai", "an ai assistant", "language model", "i am an ai", "i'm an ai",
 	"murder mystery game", "this game", "the game is over", "the game is now over",
-	"start a new game", "play again", "would you like to start", "would you like to play",
+	"start a new game", "play again", "would you like to start a new", "would you like to play",
 	"previous instructions", "system prompt", "developer mode", "as the administrator",
 	"the player", "well done, detective", "you have solved", "case is solved",
 ]
@@ -1106,6 +1106,21 @@ const GUARD_FALLBACKS := [
 	"You'll have to say that again in plain English.",
 	"I'm not sure what you're asking me.",
 ]
+
+
+## Console note when the guard fires.
+##
+## Prints the reply in FULL, deliberately. The reason names the phrase that
+## matched, but only the whole line shows whether the model actually slipped
+## into game-host register or whether an ordinary in-character sentence just
+## happened to contain the phrase - and the rejected text is thrown away
+## everywhere else, so if it is not printed here it is gone. Replies are capped
+## at num_predict 140 tokens, so this stays console-sized.
+##
+## Newlines are flattened so one rejected reply stays one console entry.
+func _guard_log(id: String, scene: String, reason: String, text: String) -> void:
+	var flat := text.replace("\r", "").replace("\n", " ").strip_edges()
+	print("[Guard] %s%s %s\n        %s" % [id, scene, reason, flat])
 
 
 ## "" when the reply is fine, otherwise a short reason for the console.
@@ -2063,7 +2078,7 @@ func _on_request_completed(result: int, response_code: int, _headers: PackedStri
 		# become the thing the next reply is conditioned on.
 		var broke := _reply_breaks_character(character_id, content)
 		if broke != "":
-			print("[Guard] %s %s | %s" % [character_id, broke, content.substr(0, 100)])
+			_guard_log(character_id, "", broke, content)
 			if not is_retry:
 				# Half a preference pair. Held rather than written, because the
 				# other half is whatever the retry comes back with.
@@ -2101,7 +2116,7 @@ func _on_request_completed(result: int, response_code: int, _headers: PackedStri
 		var group_sent: Array = group_body.get("messages", [])
 		var group_broke := _reply_breaks_character(character_id, spoken)
 		if group_broke != "":
-			print("[Guard] %s (hall) %s | %s" % [character_id, group_broke, spoken.substr(0, 100)])
+			_guard_log(character_id, " (hall)", group_broke, spoken)
 			_training_write_unpaired(character_id, group_sent, spoken, group_broke, "group")
 			spoken = _guard_fallback(character_id)
 		else:
