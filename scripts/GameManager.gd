@@ -14,7 +14,11 @@ const TrainingCaptureScript = preload("res://Scripts/TrainingCapture.gd")
 const DEBUG_KEYS := true
 
 const OLLAMA_URL := "http://127.0.0.1:11434/api/chat"
-const OLLAMA_MODEL := "huihui_ai/llama3.2-abliterate:3b"
+## Fine-tuned on 664 approved replies from the harvest, 2026-08-29. See
+## Training/RUNS.md. Switch back to the base below to compare versions;
+## Training/eval.py asks both the same 30 questions.
+##const OLLAMA_MODEL := "huihui_ai/llama3.2-abliterate:3b"
+const OLLAMA_MODEL := "archibald-suspect:v1"
 
 # Generation runs at ~34 tokens/sec on a 4050, i.e. 29ms per token, and that
 # cost is paid whether or not the text is ever shown. So these caps are latency
@@ -26,7 +30,11 @@ const OLLAMA_MODEL := "huihui_ai/llama3.2-abliterate:3b"
 # sentences (~60 tokens) - so 300 was only ever reachable by a model that had
 # started rambling, and the reward for letting it finish was 8.8 seconds of
 # waiting for text the player didn't want.
-const MAX_RESPONSE_TOKENS := 140
+## Raised from 140 after measuring the tuned model: its replies run a median
+## ~115 tokens and 14% of 601 harvested replies hit the old ceiling and were
+## cut mid-sentence. Four of 32 lines in dialogue_20260901_182749.md end
+## mid-clause for this reason. Costs ~1.7s on the longest replies.
+const MAX_RESPONSE_TOKENS := 200
 const SUMMARY_MAX_TOKENS := 340 # four labeled sections need a bit more room
 # Group-scene lines are capped harder than one-on-one answers: a Hall meetup
 # costs one sequential request PER attendee for every line the detective says,
@@ -1288,6 +1296,139 @@ func frame_player_line(raw: String) -> String:
 	return out
 
 
+# ------------------------------------------------------ schedule recall --
+# Measured 2026-09-02, ten questions about her own movements, tuned model:
+#
+#   account in the system prompt only ......... 2-3 of 10 right
+#   whole account restated before the question  no better (3 up, 3 down)
+#   ONE resolved row handed over .............. 4.5 of 5 right
+#
+# It never invented a room that was not on the card, so it can see the account
+# perfectly well. What it cannot do at 3B is select the right row, reformat the
+# times, and stay in voice all at once - the times are what it drops. It merged
+# blocks, rounded ten o'clock to half past, and once left out the room it was
+# standing in.
+#
+# So the lookup happens here, where it is exact, and the model is left with the
+# part it is good at: saying one line in character.
+#
+# Whole-evening questions ("take me through the night") are deliberately NOT
+# helped. They scored 2 of 5 even with the full account in front of it, and a
+# summary of the whole night belongs in the notepad, where the player can trust
+# it, rather than in a suspect's mouth.
+
+const HOUR_WORDS := {"eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12}
+
+## Questions about the shape of the whole night rather than one hour. Checked
+## before the clock lookup, because "backwards, starting at midnight" names a
+## time but wants the lot.
+const WHOLE_EVENING_WORDS := [
+	"whole evening", "whole night", "in order", "backwards", "every room",
+	"set foot", "how long", "all told", "take me through",
+]
+
+var _re_half_past: RegEx = null
+var _re_oclock: RegEx = null
+var _re_at_hour: RegEx = null
+
+
+func _ensure_recall_regex() -> void:
+	if _re_half_past != null:
+		return
+	_re_half_past = RegEx.new()
+	_re_half_past.compile("half past ([a-z]+)")
+	_re_oclock = RegEx.new()
+	_re_oclock.compile("\\b([a-z]+|\\d{1,2})\\s*o'?clock")
+	_re_at_hour = RegEx.new()
+	_re_at_hour.compile("\\b(?:at|about|around|between)\\s+([a-z]+|\\d{1,2})\\b")
+
+
+## Minutes past midnight the question is about, or -1 for "no particular hour".
+func _asked_minutes(question: String) -> int:
+	_ensure_recall_regex()
+	var low := question.to_lower()
+	for w in WHOLE_EVENING_WORDS:
+		if low.find(String(w)) != -1:
+			return -1
+	var m := _re_half_past.search(low)
+	if m != null and HOUR_WORDS.has(m.get_string(1)):
+		return int(HOUR_WORDS[m.get_string(1)]) * 60 + 30
+	# Typed explicitly: iterating an untyped Array leaves `re` a Variant, and
+	# := cannot infer through it.
+	for re in [_re_oclock, _re_at_hour]:
+		var rx: RegEx = re
+		var hit: RegExMatch = rx.search(low)
+		if hit == null:
+			continue
+		var tok: String = hit.get_string(1)
+		if HOUR_WORDS.has(tok):
+			return int(HOUR_WORDS[tok]) * 60
+		if tok.is_valid_int():
+			var h: int = tok.to_int()
+			if h >= 8 and h <= 12:
+				return h * 60
+	return -1
+
+
+## The one line of their account that answers this question, worded as memory.
+## Empty when the question is not about a particular hour.
+func _schedule_recall(id: String, question: String) -> String:
+	if case_data.is_empty():
+		return ""
+	var mins := _asked_minutes(question)
+	if mins < 0:
+		return ""
+	# Slot 0 is 8:00 and every slot is half an hour.
+	var slot := int(floor((mins - 8 * 60) / 30.0))
+	if slot < 0 or slot >= CaseGenerator.SLOT_COUNT:
+		return ""
+	var key := "claimed_paths" if id == murderer_id else "true_paths"
+	if not Dictionary(case_data[key]).has(id):
+		return ""
+	for b in CaseGenerator.account_blocks(case_data, id, case_data[key][id]):
+		if slot < int(b["from_slot"]) or slot > int(b["to_slot"]):
+			continue
+		var who := "on your own"
+		if int(b["from_slot"]) < CaseGenerator.DINNER_SLOTS:
+			who = "at dinner with everyone"
+		else:
+			var mates := []
+			for m in b["companions"]:
+				mates.append(String(get_character(String(m)).get("short", m)))
+			if not mates.is_empty():
+				who = "with " + _join_plain(mates)
+		# Worded as recollection on purpose. An earlier version called it a
+		# card, and the model started narrating "(lays the card on the table)"
+		# and "(folds the card square and tucks it into her bag)" - a 1930s
+		# suspect does not carry an index card listing her own movements.
+		return ("[YOU REMEMBER THIS PERFECTLY WELL. At %s you were in the %s, %s, and you "
+			+ "were there from %s. Say that hour and that room exactly as written. "
+			+ "Nothing is written down and you must never mention a card, a note, a list "
+			+ "or a page - you simply remember it. Answer in your own voice.]\n\n") % [
+			CaseGenerator.SLOT_TIMES[slot], String(b["room"]), who,
+			CaseGenerator.block_time(b),
+		]
+	return ""
+
+
+## The history as it goes out, with the recall hint on the front of the newest
+## question. Deliberately not stored in _histories: the hint is scaffolding for
+## one request, and keeping it would let it accumulate and drift out of date.
+func _request_messages(id: String) -> Array:
+	var msgs: Array = Array(_histories[id]).duplicate(true)
+	if msgs.is_empty():
+		return msgs
+	var last: Dictionary = msgs[msgs.size() - 1]
+	if String(last.get("role", "")) != "user":
+		return msgs
+	var hint := _schedule_recall(id, String(last.get("content", "")))
+	if hint == "":
+		return msgs
+	last["content"] = hint + String(last["content"])
+	msgs[msgs.size() - 1] = last
+	return msgs
+
+
 ## Send a player question to a character. Response arrives asynchronously via
 ## the ollama_response / ollama_error signals.
 func ask_character(id: String, question: String) -> void:
@@ -1300,7 +1441,7 @@ func ask_character(id: String, question: String) -> void:
 	_histories[id].append({"role": "user", "content": frame_player_line(question)})
 	var body := {
 		"model": OLLAMA_MODEL,
-		"messages": _histories[id],
+		"messages": _request_messages(id),
 		"stream": false,
 		"keep_alive": OLLAMA_KEEP_ALIVE,
 		# Hard cap on how many tokens Ollama is allowed to generate. Without
