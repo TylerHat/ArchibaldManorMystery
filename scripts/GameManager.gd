@@ -540,6 +540,10 @@ func _add_key_action(action_name: String, keycode: int, ctrl: bool = false) -> v
 ## night nobody wants to sit through.
 func start_new_game(character_ids: Array = []) -> void:
 	randomize()
+	# The guard's compiled patterns embed this game's cast and rooms, so they
+	# must not survive into the next one.
+	_word_res.clear()
+	_claim_res.clear()
 	if character_ids.is_empty():
 		var pool_ids := []
 		for c in CHARACTERS:
@@ -558,7 +562,7 @@ func start_new_game(character_ids: Array = []) -> void:
 
 	# The whole case - who, where, when, with what, and every suspect's
 	# movements through the evening - comes from CaseGenerator now. See
-	# PLAN_ProceduralCases.md; run Scenes/CaseGeneratorTest.tscn to validate it
+	# .claude/plans/procedural-cases.md; run Scenes/CaseGeneratorTest.tscn to validate it
 	# in bulk. Falling back to the old fixed scenario if generation somehow
 	# fails is deliberate: a broken case should degrade to a playable game
 	# rather than a crash.
@@ -1138,16 +1142,31 @@ const IMPOSSIBLE_WEAPONS := [
 	"bullet", "gunshot", "poison", "poisoned", "arsenic", "strychnine",
 ]
 
-## People who are not on the cast list, in the shapes a model reaches for when
-## it needs a witness and has none. Each one is checked against the character's
-## OWN brief first, because a suspect whose secret is about her mother has to be
-## able to say "my mother", and against the cast's jobs, because in a game with
-## Eugene Cross in it "butler" is a real person standing in the house.
-const INVENTED_PEOPLE := [
+## Household staff who are not on the cast list. EVERYONE IN THE HOUSE says the
+## list is complete, so any of these is a person invented to fill a gap, and
+## every one of them becomes a witness or an alibi the moment it is said out
+## loud. Checked against the cast's jobs first, because in a game with Eugene
+## Cross in it a butler is a real person standing in the house.
+const INVENTED_STAFF := [
 	"housekeeper", "maid", "footman", "valet", "cook", "butler", "servant",
 	"groundskeeper", "coachman", "constable", "sergeant", "chauffeur",
+]
+
+## Relatives, which are only ever a problem when they belong to SOMEBODY ELSE.
+## "her father" hands the detective a witness who does not exist, which is what
+## Tom did in log 2026-09-03_140417.
+##
+## A suspect's OWN family is their own business and the detective is entitled to
+## ask about it. Rejecting those outright cost eight of twenty-six exchanges in
+## log 2026-09-03_154255: the detective asked four different suspects about
+## their mothers, the guard threw away every answer and every retry, and all
+## eight came back as the canned dodge. A guard that eats honest answers is
+## worse than no guard, because the failure is invisible and reads as a bad
+## model.
+const RELATIVES := [
 	"father", "mother", "brother", "sister", "husband", "wife",
 	"son", "daughter", "niece", "nephew", "cousin", "aunt", "uncle",
+	"grandmother", "grandfather",
 ]
 
 ## Putting another guest in the room during a one-to-one interview. Sam told the
@@ -1252,6 +1271,26 @@ func _account_rooms(id: String) -> Dictionary:
 	return out
 
 
+## Whether a relative is being attributed to somebody OTHER than the speaker:
+## "her father", "his mother", "Evelyn's father", "Reginald's brother".
+##
+## "my mother", "a father" and "your parents" all pass, because a person talking
+## about their own family has invented nobody - they have not put a new witness
+## in the house or given the detective somebody new to go and ask.
+func _relative_of_someone_else(low: String, word: String) -> bool:
+	var key := "rel:" + word
+	if not _word_res.has(key):
+		var owners := PackedStringArray(["her", "his", "their", "reginald", "archibald"])
+		for c in active_characters():
+			for form in [String(c.get("short", "")), String(c.get("first_name", ""))]:
+				if form != "":
+					owners.append(form.to_lower())
+		var re := RegEx.new()
+		re.compile("(?i)\\b(?:" + "|".join(owners) + ")(?:'s|s')?\\s+(?:own\\s+)?" + word + "\\b")
+		_word_res[key] = re
+	return (_word_res[key] as RegEx).search(low) != null
+
+
 ## Whether the reply says, in the first person, that they were in `room`.
 ##
 ## "I was not in the Ballroom" is excluded: denying a room you were never in is
@@ -1333,11 +1372,17 @@ func _reply_breaks_character(id: String, text: String, in_hall: bool = false) ->
 				return "put another guest in the interview (\"%s\")" % String(phrase)
 
 	var brief := _brief_text(id)
-	for word in INVENTED_PEOPLE:
+	for word in INVENTED_STAFF:
 		if brief.find(String(word)) != -1 or _job_on_the_cast(String(word)):
 			continue
 		if _has_word(low, String(word)):
-			return "invented a person who is not in the house (\"%s\")" % String(word)
+			return "invented a member of staff who is not in the house (\"%s\")" % String(word)
+
+	for word in RELATIVES:
+		if brief.find(String(word)) != -1:
+			continue
+		if _relative_of_someone_else(low, String(word)):
+			return "gave another guest a relative who does not exist (\"%s\")" % String(word)
 
 	var mine := _account_rooms(id)
 	if not mine.is_empty():

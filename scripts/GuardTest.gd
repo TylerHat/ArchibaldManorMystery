@@ -161,7 +161,10 @@ func _ready() -> void:
 		["denies the murder", "He died of natural causes, detective. I am quite sure of it.", who, false],
 		["offers a heart attack", "It was a heart attack. There is nothing more to it.", who, false],
 		["a weapon not in the case", "I have seen her with the %s before." % absent_weapon, who, false],
-		["a person who does not exist", "The coachman was in the passage, he will tell you.", who, false],
+		["invented staff", "The coachman was in the passage, he will tell you.", who, false],
+		# Verbatim shape of Tom's line in log 2026-09-03_140417: a relative
+		# belonging to another guest is a witness who does not exist.
+		["another guest's relative", "I have known her since she was a girl, with her father.", who, false],
 		["another guest in the room", "You should be worried about the gentleman at your back.", who, false],
 		["a room they were never in", "I was in the %s from nine until ten." % elsewhere, who, false],
 	]:
@@ -178,6 +181,12 @@ func _ready() -> void:
 		["never went there", "I never went in the %s, detective." % elsewhere, who, false],
 		# thorne's own secret is about her mother, so she must be able to say it.
 		["a relative in their own brief", "My mother is buried on the south lawn.", "thorne", false],
+		# The eight exchanges lost in log 2026-09-03_154255. The detective asked
+		# four suspects about their mothers and the guard ate every answer and
+		# every retry, so all eight came back as the canned dodge.
+		["their own mother", "A father, child, and a mother. I have seen them twice.", who, false],
+		["my own family", "My father was a hard man and my mother said nothing about it.", who, false],
+		["answering a question about parents", "I never knew my parents. I was raised by the parish.", who, false],
 		# cross_eugene is the butler, so a butler is a person in this house.
 		["a job somebody actually holds", "The butler was clearing the table when I came through.", who, false],
 		# The other guests really are standing there in a Hall meetup.
