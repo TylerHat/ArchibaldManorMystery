@@ -8,7 +8,7 @@ regression run (`Scenes/DialogueOptTest.tscn`, F6). All pass.
 
 ---
 
-## 0. The Ollama restart loop — `Fix_Ollama.ps1`
+## 0. The Ollama restart loop — `Tools/Fix_Ollama.ps1`
 
 **Root cause, from `app.log`:** two Ollama app instances. The second one's
 single-instance check failed with `"failed to send focus message to existing
@@ -215,7 +215,7 @@ not worth me doing silently.
 
 ## What to do next
 
-1. Run **`Fix_Ollama.ps1`** (right-click → Run with PowerShell, **not** as admin).
+1. Run **`Tools/Fix_Ollama.ps1`** (right-click → Run with PowerShell, **not** as admin).
 2. Open the project, press **F6** on `Scenes/DialogueOptTest.tscn` — expect 23 passes.
 3. Play a Hall meetup with 3–4 suspects.
 4. Check the slots took effect:

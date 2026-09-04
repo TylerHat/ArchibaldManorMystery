@@ -26,7 +26,7 @@ extends Node3D
 #   4. In the Inspector, tick "Rebuild Now". The manor appears in the viewport.
 #   5. Delete the four hand-placed Kitchen_* walls under the old Rooms node.
 #
-# See MANOR_BUILDER.md for the Main.gd integration patch.
+# See .claude/reference/manor-builder.md for the Main.gd integration patch.
 # ---------------------------------------------------------------------------
 
 

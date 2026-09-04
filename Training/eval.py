@@ -198,7 +198,7 @@ def main():
     ap.add_argument("--lines", default="Training/eval_lines.txt")
     ap.add_argument("--system", default=None)
     ap.add_argument("--data-dir", default="TrainingData")
-    ap.add_argument("--out", default="eval_report.md")
+    ap.add_argument("--out", default="Training/reports/eval_report.md")
     ap.add_argument("--timeout", type=int, default=180)
     args = ap.parse_args()
 
@@ -206,6 +206,7 @@ def main():
     system = system_prompt(args.system, args.data_dir)
     score = defaultdict(Counter)
 
+    Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     out = Path(args.out).open("w", encoding="utf-8")
     out.write("# Eval report\n\nSame questions, every model, same system prompt.\n")
     out.write("Mark each reply yourself: the automatic flags below catch the "

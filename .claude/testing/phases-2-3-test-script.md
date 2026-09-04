@@ -330,7 +330,7 @@ Turn the dialogue log on, play briefly, then open the file in `DialogueLogs/`.
 ## Not implemented yet — don't report these
 
 All five phases are in. Still out of scope by design (see
-`PLAN_ProceduralCases.md` §8):
+`.claude/plans/procedural-cases.md` §8):
 
 - **Motives don't vary** — each character keeps their one fixed trait, so the
   murderer's motive is the same every game they're guilty

@@ -16,6 +16,13 @@ sees everyone, and who is *missing* changes the case as much as who is
 present. The murderer is then picked at random from among just the guests
 who came, so it could be Marcus one game and Count Varga the next.
 
+## Documentation
+
+Everything written about the project lives in [`.claude/`](.claude/). Start with
+[`.claude/guides/00-start-here.md`](.claude/guides/00-start-here.md), which gets a
+new contributor from a fresh clone to a running game and then points at the
+right guide for the job. [`.claude/README.md`](.claude/README.md) is the index.
+
 ## Requirements
 
 1. **Godot 4.7** (this project was targeted at 4.7, matching what you have
@@ -55,9 +62,10 @@ view/UI stretch to fill whatever size you resize it to (no black ba6.rs).
   locally, so it costs no thinking time and they don't answer it in
   character - you just get a short acknowledgement.
 - **Hall meetups** - send suspects to the Hall one at a time and they'll
-  gather there (two of them; a third will refuse in character). Walk into
-  the Hall yourself with both present and the interact prompt changes to
-  **Address the room**. See "Confronting them together" below.
+  gather there (up to four of them; anyone past that will refuse in
+  character). Walk into the Hall yourself with two or more present and the
+  interact prompt changes to **Address the room**. See "Confronting them
+  together" below.
 - **Doing things, not just saying them** - put an action in round brackets and
   it's treated as something you physically do, rather than words you say out
   loud: `(I give Tom a high five)`, `(leans in) So where were you at eleven?`,
@@ -144,13 +152,13 @@ story. To catch someone in a lie you generally need the person who can
 contradict them standing in the same room.
 
 - **Gathering.** Tell suspects "go to the hall" in their own conversations,
-  one at a time. The Hall holds two of them; a third will refuse rather than
-  crowd in. A three-handed scene - you and two suspects - is deliberate: one
-  accuses, one defends, and you referee. It's also twice as fast as a
-  four-way, since every attendee costs one more request per line you say.
-- **Starting.** Walk into the Hall with both of them there and interact.
-  Nothing happens until *you* speak - they'll stand there indefinitely
-  otherwise.
+  one at a time. The Hall holds four of them; a fifth will refuse rather than
+  crowd in. A three-handed scene - you and two suspects - is still the
+  sharpest shape: one accuses, one defends, and you referee. It is also the
+  fastest, since every extra attendee costs one more request per line you say.
+- **Starting.** Walk into the Hall with two or more of them there and
+  interact. Nothing happens until *you* speak - they'll stand there
+  indefinitely otherwise.
 - **Taking turns.** Say something to the room and each un-silenced suspect
   answers once, in turn, each hearing what the ones before them just said.
   The order rotates every round so the same person isn't always first to
@@ -184,7 +192,7 @@ contradict them standing in the same room.
 
 ## Procedural cases (in progress)
 
-`PLAN_ProceduralCases.md` describes the work to make every playthrough generate
+`.claude/plans/procedural-cases.md` describes the work to make every playthrough generate
 its own murder - different room, weapon, method, time, and a real per-suspect
 schedule for the evening - rather than reusing one fixed scenario.
 

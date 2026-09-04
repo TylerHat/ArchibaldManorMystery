@@ -10,7 +10,7 @@
 > output was diffed against the old `_build_wall_side()` box by box and is
 > identical.
 >
-> See **`MANOR_BUILDER.md`** for setup and the `Main.gd` patch.
+> See **`.claude/reference/manor-builder.md`** for setup and the `Main.gd` patch.
 >
 > Kept for reference only: the dimension tables and the wall-type breakdown in
 > Part 3 are still accurate and useful.

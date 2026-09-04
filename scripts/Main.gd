@@ -62,7 +62,7 @@ const MEETUP_ROOM := "Hall"
 # What changed: group lines are no longer copied into every attendee's permanent
 # memory (GroupChat renders the scene on demand instead), the system prompt now
 # shares a cached prefix across all suspects, and OLLAMA_NUM_PARALLEL=4 gives
-# each suspect their own cache slot. See PLAN_DialogueOptimization.md.
+# each suspect their own cache slot. See .claude/plans/dialogue-optimization-technical.md.
 #
 # Note this is a cap on the ROOM, not on drama: three-handed scenes are still
 # the sharpest, because one accuser and one defender is the cleanest shape.

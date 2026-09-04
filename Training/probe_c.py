@@ -123,7 +123,7 @@ def main():
     ap.add_argument("--lines", default="Training/_probe_lines.txt")
     ap.add_argument("--system", default=None)
     ap.add_argument("--data-dir", default="TrainingData")
-    ap.add_argument("--out", default="probe_c.md")
+    ap.add_argument("--out", default="Training/reports/probe_c.md")
     ap.add_argument("--timeout", type=int, default=180)
     ap.add_argument("--dry-run", action="store_true", help="show the injections, ask nothing")
     args = ap.parse_args()
@@ -140,6 +140,7 @@ def main():
           for l in Path(args.lines).read_text(encoding="utf-8").splitlines()
           if "|" in l and not l.startswith("#")]
 
+    Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     out = Path(args.out).open("w", encoding="utf-8")
     out.write("# Probe C - one row, not the whole table\n\n")
     out.write("Each question shows the fact the game resolved and injected, then the reply.\n")

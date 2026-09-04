@@ -112,7 +112,7 @@ Targets before a first run: **300+** rows in `sft.jsonl`, **120+** pairs in
 ## eval.py
 
 Asks all 30 questions in `eval_lines.txt` of every model named, using the real
-system prompt lifted out of your captured data, and writes `eval_report.md` with
+system prompt lifted out of your captured data, and writes `Training/reports/eval_report.md` with
 the answers side by side.
 
 It auto-flags two things: phrases from the game's own `OUT_OF_CHARACTER` list,

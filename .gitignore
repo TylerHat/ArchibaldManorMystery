@@ -31,10 +31,9 @@ DialogueLogs/
 sft.jsonl
 dpo.jsonl
 dpo_needs_chosen.jsonl
-eval_report.md
-probe_*.md
+Training/reports/
 *.gguf
-ArchibaldModelfile*
+Tools/ArchibaldModelfile*
 
 # Scratch drawer for files that could not be deleted on a OneDrive mount.
 _to_delete/
