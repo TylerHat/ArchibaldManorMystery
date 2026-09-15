@@ -237,6 +237,7 @@ var selection_start_button: Button
 var selection_log_checkbox: CheckBox
 var selection_seed_input: LineEdit
 var selection_seed_status: Label
+var selection_engine_status: Label # reflects GameManager.engine_is_ready / engine_error_message - see _refresh_engine_status()
 
 
 func _ready() -> void:
@@ -245,6 +246,8 @@ func _ready() -> void:
 	GameManager.ollama_error.connect(_on_ollama_error)
 	GameManager.summary_ready.connect(_on_summary_ready)
 	GameManager.summary_error.connect(_on_summary_error)
+	GameManager.engine_ready.connect(_on_engine_ready)
+	GameManager.engine_failed.connect(_on_engine_failed)
 
 	GameManager.group_chat.line_added.connect(_on_group_line_added)
 	GameManager.group_chat.turn_started.connect(_on_group_turn_started)
@@ -447,6 +450,10 @@ func _build_selection_screen() -> void:
 	selection_start_button.pressed.connect(_on_start_pressed)
 	button_row.add_child(selection_start_button)
 
+	selection_engine_status = Label.new()
+	selection_engine_status.add_theme_font_size_override("font_size", 12)
+	vbox.add_child(selection_engine_status)
+
 	# Deliberately last: _random_select() ticks boxes and then calls
 	# _update_selection_count(), which needs the count label and Start button
 	# to exist. Opening on a random legal cast beats opening on all 12, which
@@ -524,7 +531,40 @@ func _update_selection_count() -> void:
 		selection_start_button.disabled = true
 	else:
 		selection_count_label.add_theme_color_override("font_color", Color(0.55, 1, 0.55))
-		selection_start_button.disabled = false
+		# Also gated on the AI engine actually being up - see
+		# _refresh_engine_status() below. Kept in this same branch, as the one
+		# place that decides selection_start_button.disabled, rather than having
+		# the engine-ready handlers below set it independently and race with a
+		# checkbox toggle.
+		selection_start_button.disabled = not GameManager.engine_is_ready
+	_refresh_engine_status()
+
+
+## Small status line under the Start button, reflecting GameManager's own
+## engine_is_ready / engine_error_message (see GameManager.gd's "llama-server
+## engine lifecycle" section). Read directly rather than only trusted to a
+## live signal, since engine_ready/engine_failed may already have fired
+## before this screen was built - "Play Again" rebuilds this screen without
+## restarting the engine.
+func _refresh_engine_status() -> void:
+	if selection_engine_status == null:
+		return
+	if GameManager.engine_is_ready:
+		selection_engine_status.text = ""
+	elif GameManager.engine_error_message != "":
+		selection_engine_status.text = "AI engine problem: %s" % GameManager.engine_error_message
+		selection_engine_status.add_theme_color_override("font_color", Color(1, 0.5, 0.5))
+	else:
+		selection_engine_status.text = "Starting the AI engine..."
+		selection_engine_status.add_theme_color_override("font_color", Color(1, 1, 0.6))
+
+
+func _on_engine_ready() -> void:
+	_update_selection_count()
+
+
+func _on_engine_failed(_message: String) -> void:
+	_update_selection_count()
 
 
 func _on_start_pressed() -> void:
