@@ -2,8 +2,9 @@ extends Node
 # GameManager (autoload singleton)
 # Holds the 12-suspect roster (8 of them in the house per game), randomizes
 # the murderer each playthrough, talks to a
-# local Ollama server running archibald-basev2.1:3b to generate in-character
-# responses, and checks the player's final accusation at the front door.
+# local llama-server engine running the archibald-basev2.1 model to generate
+# in-character responses, and checks the player's final accusation at the
+# front door.
 
 const DialogueLogScript = preload("res://Scripts/DialogueLog.gd")
 
@@ -12,8 +13,13 @@ const DialogueLogScript = preload("res://Scripts/DialogueLog.gd")
 ## actions are not even registered then, so the keys do nothing at all.
 const DEBUG_KEYS := true
 
-const OLLAMA_URL := "http://127.0.0.1:11434/api/chat"
-const OLLAMA_MODEL := "archibald-basev2.1:3b"
+# llama-server's default port (Ollama's was 11434). Phase 4 of the
+# embedded-inference plan launches llama-server with --port 8080 to match.
+const LLAMA_SERVER_URL := "http://127.0.0.1:8080/v1/chat/completions"
+# llama-server is launched with exactly one model already loaded (see
+# Tools/llama-server-README.md), so it ignores this field in practice - it's
+# kept only so requests and logs read clearly.
+const LLAMA_SERVER_MODEL := "archibald-basev2.1"
 
 # Generation runs at ~34 tokens/sec on a 4050, i.e. 29ms per token, and that
 # cost is paid whether or not the text is ever shown. So these caps are latency
@@ -56,28 +62,32 @@ const GROUP_MAX_TOKENS := 130
 # spoken line, so a blank line means it has moved on to something else.
 const STOP_SEQUENCES := ["\n\n", "Detective:", "\nDetective", "DETECTIVE:"]
 
-# Keeps the model resident in VRAM between questions. The default is 5 minutes,
-# which is shorter than a player can plausibly spend reading their case notes -
-# and the reload measured on this hardware costs 60 SECONDS. Sent per-request so
-# it works regardless of how Ollama was launched, and so the fix travels with
-# the project rather than living in someone's environment variables.
-const OLLAMA_KEEP_ALIVE := "30m"
-
-# How much conversation the model is allowed to keep in view. This MUST be set
-# explicitly: Ollama's default context is small (2048 on older builds, 4096 on
-# newer ones, and it derives one from VRAM if you say nothing), and when a
-# conversation outgrows it the oldest messages are silently dropped - starting
-# with the system prompt, since the runner only pins four tokens.
+# Ollama used to unload the model after 5 minutes idle, and a reload measured
+# on this hardware cost 60 SECONDS - hence a keep_alive field sent on every
+# request, so the fix travelled with the project rather than living in
+# someone's environment variables.
 #
-# We no longer rely on that behaviour being survivable. HISTORY_TOKEN_BUDGET
-# below keeps every history comfortably inside this window and decides for
-# itself what gets forgotten; see _compact_history_if_needed().
+# llama-server has no equivalent setting, and needs none: it loads the model
+# once at startup and keeps it resident in VRAM for as long as the process
+# runs, with no idle-unload behaviour to defeat. Removed rather than ported.
+
+# How much conversation the model is allowed to keep in view. Ollama took this
+# per-request as "options.num_ctx"; llama-server fixes it at process launch
+# instead (the --ctx-size argument, set in Phase 4), so it is no longer sent
+# in any request body below. The constant stays: HISTORY_TOKEN_BUDGET is sized
+# against it, _dump_group_payload() reports it for debugging, and Phase 4
+# reads the number from here rather than keeping a second copy.
+#
+# We do not rely on the runner's own eviction being survivable either way.
+# HISTORY_TOKEN_BUDGET below keeps every history comfortably inside this
+# window and decides for itself what gets forgotten; see
+# _compact_history_if_needed().
 #
 # Group scenes used to fill this window several times faster than private ones,
 # because every attendee's line was written into every other attendee's history.
 # They no longer are - GroupChat renders the room on demand instead - so a
 # meetup now costs about what a private interview costs.
-const OLLAMA_NUM_CTX := 8192
+const LLAMA_SERVER_NUM_CTX := 8192
 
 # How much of a suspect's private interview gets replayed into their group-scene
 # turn prompt. See private_recap() for why this exists at all.
@@ -86,7 +96,7 @@ const RECAP_MAX_CHARS := 160
 
 # ------------------------------------------------------ history compaction --
 #
-# When a conversation outgrows num_ctx, Ollama drops the OLDEST messages to make
+# When a conversation outgrows num_ctx, the runner drops the OLDEST messages to make
 # room. The runner reports n_keep = 4, meaning four tokens are pinned and
 # everything else is fair game - so the first thing evicted is the system
 # prompt, and the last thing in the system prompt is YOUR OWN MOVEMENTS LAST
@@ -98,7 +108,7 @@ const RECAP_MAX_CHARS := 160
 #
 # So we decide what gets forgotten, and we never let it be the system prompt.
 
-## Total budget for one character's history. The rest of OLLAMA_NUM_CTX is left
+## Total budget for one character's history. The rest of LLAMA_SERVER_NUM_CTX is left
 ## for the group turn prompt (~700 tokens, which now also carries the rendered
 ## scene) and the reply itself.
 const HISTORY_TOKEN_BUDGET := 4500
@@ -366,7 +376,7 @@ var debug_dump_group: bool = false
 ## for reviewing hallucinations afterwards. The whole file is rewritten on each
 ## new line rather than appended to, so it's always complete even if the game
 ## is closed mid-session - the transcript is small enough that the cost doesn't
-## matter next to an Ollama round-trip.
+## matter next to an AI round-trip.
 var dialogue_log_enabled: bool = false
 var dialogue_log_path: String = "" # res:// or user:// path for this session, "" when off
 
@@ -420,7 +430,7 @@ var _summaries: Dictionary = {} # character_id -> {timeline, motive, slipups} (e
 var _summarized_at: Dictionary = {} # character_id -> transcript entry count included in that summary
 
 # A tiny request queue sits in front of the single HTTPRequest node, since
-# Ollama/HTTPRequest can only have one request in flight at a time. Both
+# HTTPRequest can only have one request in flight at a time. Both
 # in-character dialogue (ask_character) and case-notes summarization
 # (request_summary) go through this same queue so they never collide - a
 # summary request will simply wait its turn behind a dialogue request, or
@@ -1123,7 +1133,7 @@ func _retry_in_character(item: Dictionary) -> void:
 
 	var retry := item.duplicate(true)
 	retry["body"]["messages"] = msgs
-	retry["body"]["options"]["temperature"] = 0.5
+	retry["body"]["temperature"] = 0.5
 	retry["guard_retry"] = true
 	_request_queue.push_front(retry)
 
@@ -1239,25 +1249,26 @@ func ask_character(id: String, question: String) -> void:
 		return
 	# Before appending, so the request that goes out is already within budget -
 	# compacting after the reply would let exactly one over-budget prompt through
-	# to Ollama, and that is the one that gets silently truncated.
+	# to the engine, and that is the one that gets silently truncated.
 	_compact_history_if_needed(id)
 	_histories[id].append({"role": "user", "content": frame_player_line(question)})
 	var body := {
-		"model": OLLAMA_MODEL,
+		"model": LLAMA_SERVER_MODEL,
 		"messages": _histories[id],
 		"stream": false,
-		"keep_alive": OLLAMA_KEEP_ALIVE,
-		# Hard cap on how many tokens Ollama is allowed to generate. Without
+		# Hard cap on how many tokens the engine is allowed to generate. Without
 		# this, a chatty model can ramble for hundreds of tokens on a one-line
 		# question, which is the single biggest cause of multi-minute waits -
 		# far bigger than model size or CPU vs GPU. ~120 tokens is roughly a
 		# short paragraph, plenty for an in-character answer.
-		"options": {
-			"num_predict": MAX_RESPONSE_TOKENS,
-			"temperature": 0.8,
-			"num_ctx": OLLAMA_NUM_CTX,
-			"stop": STOP_SEQUENCES,
-		},
+		#
+		# These were nested under "options" for Ollama's /api/chat. The
+		# OpenAI-style endpoint llama-server speaks instead takes them at the
+		# top level, and has no per-request num_ctx or keep_alive at all - see
+		# LLAMA_SERVER_NUM_CTX and the removed OLLAMA_KEEP_ALIVE above.
+		"max_tokens": MAX_RESPONSE_TOKENS,
+		"temperature": 0.8,
+		"stop": STOP_SEQUENCES,
 	}
 	_enqueue({"kind": "dialogue", "character_id": id, "question": question, "body": body})
 
@@ -1415,21 +1426,20 @@ func ask_group_member(id: String, prompt: String, player_line: String = "", witn
 	if debug_dump_group:
 		_dump_group_payload(id, messages)
 	var body := {
-		"model": OLLAMA_MODEL,
+		"model": LLAMA_SERVER_MODEL,
 		"messages": messages,
 		"stream": false,
-		"keep_alive": OLLAMA_KEEP_ALIVE,
 		# Lower temperature than one-on-one dialogue on purpose. In a private
 		# interview a bit of variety makes a suspect feel alive; in a group
 		# scene the same variety reads as a character who can't keep their
 		# story straight, because every line is immediately checkable against
 		# what they said two turns ago in front of witnesses.
-		"options": {
-			"num_predict": GROUP_MAX_TOKENS,
-			"temperature": 0.6,
-			"num_ctx": OLLAMA_NUM_CTX,
-			"stop": STOP_SEQUENCES,
-		},
+		#
+		# Top-level now, not nested under "options" - see ask_character() above
+		# for why.
+		"max_tokens": GROUP_MAX_TOKENS,
+		"temperature": 0.6,
+		"stop": STOP_SEQUENCES,
 	}
 	_enqueue({
 		"kind": "group",
@@ -1459,7 +1469,7 @@ func _dump_group_payload(id: String, messages: Array) -> void:
 		total += String(msg["content"]).length()
 
 	print("\n===== GROUP PROMPT -> %s =====" % String(c.get("name", id)))
-	print("%d messages, %d chars (~%d tokens), num_ctx=%d" % [messages.size(), total, int(total / 4.0), OLLAMA_NUM_CTX])
+	print("%d messages, %d chars (~%d tokens), num_ctx=%d" % [messages.size(), total, int(total / 4.0), LLAMA_SERVER_NUM_CTX])
 	for i in range(messages.size()):
 		var msg: Dictionary = messages[i]
 		var content := String(msg["content"]).replace("\n", " | ")
@@ -1656,13 +1666,12 @@ func request_summary(character_id: String) -> void:
 	sys_prompt += "those are not %s's own words, but %s heard them." % [String(c["short"]), String(c["short"])]
 
 	var body := {
-		"model": OLLAMA_MODEL,
+		"model": LLAMA_SERVER_MODEL,
 		"messages": [
 			{"role": "system", "content": sys_prompt},
 			{"role": "user", "content": convo},
 		],
 		"stream": false,
-		"keep_alive": OLLAMA_KEEP_ALIVE,
 		# Deliberately NO "stop" here, unlike dialogue and group requests. The
 		# summary is a four-section document, and a blank line between sections
 		# is entirely plausible output - so the "\n\n" stop that protects the
@@ -1670,7 +1679,8 @@ func request_summary(character_id: String) -> void:
 		# ##TIMELINE##, losing the three sections the player actually opened the
 		# panel for. Correctness beats the second or two it would save, and
 		# summaries are generated lazily anyway.
-		"options": {"num_predict": SUMMARY_MAX_TOKENS, "temperature": 0.4, "num_ctx": OLLAMA_NUM_CTX},
+		"max_tokens": SUMMARY_MAX_TOKENS,
+		"temperature": 0.4,
 	}
 	_enqueue({"kind": "summary", "character_id": character_id, "entry_count": entries.size(), "body": body})
 
@@ -1781,12 +1791,12 @@ func _process_queue() -> void:
 
 	var json_str := JSON.stringify(_current_request["body"])
 	var headers := ["Content-Type: application/json"]
-	var err := _http.request(OLLAMA_URL, headers, HTTPClient.METHOD_POST, json_str)
+	var err := _http.request(LLAMA_SERVER_URL, headers, HTTPClient.METHOD_POST, json_str)
 	if err != OK:
 		var item := _current_request
 		_busy = false
 		_current_request = {}
-		_emit_failure(item, "Could not start the request (engine error %s). Is Ollama running at %s?" % [err, OLLAMA_URL])
+		_emit_failure(item, "Could not start the request (engine error %s). Is llama-server running at %s?" % [err, LLAMA_SERVER_URL])
 		_process_queue()
 
 
@@ -1810,25 +1820,34 @@ func _on_request_completed(result: int, response_code: int, _headers: PackedStri
 		return
 
 	if result != HTTPRequest.RESULT_SUCCESS or response_code != 200:
-		_emit_failure(item, "Could not reach Ollama (HTTP %s). Make sure 'ollama serve' is running and that you've run 'ollama pull %s'." % [response_code, OLLAMA_MODEL])
+		_emit_failure(item, "Could not reach the AI engine (HTTP %s). Make sure llama-server is running with the %s model loaded - see Tools/llama-server-README.md." % [response_code, LLAMA_SERVER_MODEL])
 		_process_queue()
 		return
 
 	var text := body.get_string_from_utf8()
 	var json := JSON.new()
 	if json.parse(text) != OK:
-		_emit_failure(item, "Ollama sent back a response that couldn't be read.")
+		_emit_failure(item, "The engine sent back a response that couldn't be read.")
 		_process_queue()
 		return
 
 	var data = json.get_data()
 	var content := ""
-	if typeof(data) == TYPE_DICTIONARY and data.has("message"):
-		content = str(data["message"].get("content", ""))
+	# llama-server speaks the OpenAI chat-completions shape: the reply lives at
+	# choices[0].message.content, not the message.content Ollama's /api/chat
+	# used. Guarded the same defensive way the old code checked for "message" -
+	# a malformed or error body should fall through to the empty-reply check
+	# below rather than crash on a missing key.
+	if typeof(data) == TYPE_DICTIONARY and data.has("choices"):
+		var choices = data["choices"]
+		if typeof(choices) == TYPE_ARRAY and choices.size() > 0:
+			var first = choices[0]
+			if typeof(first) == TYPE_DICTIONARY and first.has("message"):
+				content = str(first["message"].get("content", ""))
 	content = content.strip_edges()
 
 	if content == "":
-		_emit_failure(item, "Ollama returned an empty reply. Try asking again.")
+		_emit_failure(item, "The engine returned an empty reply. Try asking again.")
 		_process_queue()
 		return
 
