@@ -38,3 +38,9 @@ ArchibaldModelfile*
 
 # Scratch drawer for files that could not be deleted on a OneDrive mount.
 _to_delete/
+
+# --- llama-server engine binary, fetched from upstream, not stored here --
+# ~370MB with its bundled CUDA DLLs, and GitHub rejects individual files
+# over 100MB regardless. Tools/llama-server-README.md has the exact
+# download link, this stays a sibling file so it survives this rule.
+Tools/llama-server/
