@@ -1,4 +1,9 @@
-# llama-server engine
+# llama-server engine (Windows)
+
+This is the Windows/CUDA build. For macOS, see
+`Tools/llama-server-macos-README.md` instead - `GameManager.gd` picks
+whichever one matches the OS it's running on (see
+`claude/mac-support-overview.md`).
 
 `Tools/llama-server/` holds `llama-server.exe` and its supporting DLLs from
 the upstream `llama.cpp` project (https://github.com/ggml-org/llama.cpp,
