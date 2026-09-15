@@ -537,6 +537,13 @@ func _add_key_action(action_name: String, keycode: int, ctrl: bool = false) -> v
 # loaded" question the way Ollama's shared model store raised - llama-server
 # only ever has whichever .gguf we hand it on the command line. See
 # claude/embedded-inference-phase4-subprocess-lifecycle.md.
+#
+# Extended for macOS support (see claude/mac-support-overview.md): the check
+# -launch-wait sequence and _engine_base_dir() below are already OS-agnostic
+# (they were written that way from the start), so the only thing that needed
+# to change to add a second OS was _engine_folder()/_engine_binary_name()
+# picking a different engine build per platform. Windows's own path and
+# behavior are untouched by this.
 
 const LLAMA_SERVER_HEALTH_URL := "http://127.0.0.1:8080/health"
 # How long the very first check (is something already listening?) is allowed
@@ -546,6 +553,28 @@ const LLAMA_SERVER_CHECK_TIMEOUT_SEC := 2.0
 const LLAMA_SERVER_POLL_INTERVAL_SEC := 0.5
 # ...and the total ceiling before giving up and reporting a failure.
 const LLAMA_SERVER_READY_TIMEOUT_SEC := 20.0
+
+# Relative folder (under _engine_base_dir()) that holds the llama-server
+# build for the current OS, and the binary's file name inside it. Windows
+# keeps the exact values Phase 4 shipped with, untouched. macOS is new
+# (Mac support plan). Any other OS isn't set up yet and _launch_engine()
+# below fails cleanly rather than guessing a path that doesn't exist.
+const ENGINE_FOLDER_WINDOWS := "Tools/llama-server"
+const ENGINE_FOLDER_MACOS := "Tools/llama-server-macos"
+
+
+func _engine_folder() -> String:
+	match OS.get_name():
+		"Windows":
+			return ENGINE_FOLDER_WINDOWS
+		"macOS":
+			return ENGINE_FOLDER_MACOS
+		_:
+			return ""
+
+
+func _engine_binary_name() -> String:
+	return "llama-server.exe" if OS.get_name() == "Windows" else "llama-server"
 
 
 ## Kicks off the check-launch-wait sequence. Called once from _ready(), before
@@ -594,11 +623,16 @@ func _engine_base_dir() -> String:
 
 
 func _launch_engine() -> void:
-	var exe_path := _engine_base_dir().path_join("Tools/llama-server/llama-server.exe")
+	var engine_folder := _engine_folder()
+	if engine_folder.is_empty():
+		_fail_engine("This game's embedded AI engine doesn't support %s yet (only Windows and macOS are set up)." % OS.get_name())
+		return
+
+	var exe_path := _engine_base_dir().path_join(engine_folder).path_join(_engine_binary_name())
 	var model_path := _engine_base_dir().path_join("Models/AI/archibald-basev2.1.gguf")
 
 	if not FileAccess.file_exists(exe_path):
-		_fail_engine("Could not find llama-server.exe at %s. See Tools/llama-server-README.md to download it." % exe_path)
+		_fail_engine("Could not find the AI engine at %s. See Tools/llama-server-README.md (Windows) or Tools/llama-server-macos-README.md (macOS) to download it." % exe_path)
 		return
 	if not FileAccess.file_exists(model_path):
 		_fail_engine("Could not find the model file at %s. See Models/AI/README.md to download it." % model_path)
@@ -636,7 +670,7 @@ func _launch_engine() -> void:
 
 func _on_engine_poll_timer_timeout() -> void:
 	if not OS.is_process_running(_engine_pid):
-		_fail_engine("llama-server exited before it became ready. Check that Tools/llama-server/ and Models/AI/archibald-basev2.1.gguf are both present and not corrupted.")
+		_fail_engine("llama-server exited before it became ready. Check that %s and Models/AI/archibald-basev2.1.gguf are both present and not corrupted." % _engine_folder())
 		return
 
 	_engine_wait_elapsed += LLAMA_SERVER_POLL_INTERVAL_SEC
