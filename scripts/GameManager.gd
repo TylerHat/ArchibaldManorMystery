@@ -2,8 +2,8 @@ extends Node
 # GameManager (autoload singleton)
 # Holds the 12-suspect roster (8 of them in the house per game), randomizes
 # the murderer each playthrough, talks to a
-# local Ollama server running llama3.2:3b to generate in-character responses,
-# and checks the player's final accusation at the front door.
+# local Ollama server running archibald-basev2.1:3b to generate in-character
+# responses, and checks the player's final accusation at the front door.
 
 const DialogueLogScript = preload("res://Scripts/DialogueLog.gd")
 
@@ -13,7 +13,7 @@ const DialogueLogScript = preload("res://Scripts/DialogueLog.gd")
 const DEBUG_KEYS := true
 
 const OLLAMA_URL := "http://127.0.0.1:11434/api/chat"
-const OLLAMA_MODEL := "huihui_ai/llama3.2-abliterate:3b"
+const OLLAMA_MODEL := "archibald-basev2.1:3b"
 
 # Generation runs at ~34 tokens/sec on a 4050, i.e. 29ms per token, and that
 # cost is paid whether or not the text is ever shown. So these caps are latency
