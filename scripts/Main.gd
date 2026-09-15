@@ -454,6 +454,19 @@ func _build_selection_screen() -> void:
 	selection_engine_status.add_theme_font_size_override("font_size", 12)
 	vbox.add_child(selection_engine_status)
 
+	# Required by the Llama 3.2 Community License (see Models/AI/NOTICE.txt):
+	# fine-tuning Llama 3.2 and distributing the result means displaying
+	# "Built with Llama" somewhere in the product's UI. This screen is what
+	# every player sees before every game, so it's the natural, always-visible
+	# place for it - deliberately small and low-contrast, a credit rather than
+	# a banner.
+	var llama_credit := Label.new()
+	llama_credit.text = "Suspect dialogue is generated locally by a fine-tuned Llama 3.2 model. Built with Llama."
+	llama_credit.autowrap_mode = TextServer.AUTOWRAP_WORD
+	llama_credit.add_theme_font_size_override("font_size", 11)
+	llama_credit.add_theme_color_override("font_color", Color(1, 1, 1, 0.45))
+	vbox.add_child(llama_credit)
+
 	# Deliberately last: _random_select() ticks boxes and then calls
 	# _update_selection_count(), which needs the count label and Start button
 	# to exist. Opening on a random legal cast beats opening on all 12, which
