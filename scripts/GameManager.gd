@@ -360,6 +360,14 @@ signal summary_error(character_id, message)
 signal group_response(character_id, text, token)
 signal group_error(character_id, message, token)
 
+# Same shape as the signals above: one "it worked" signal, one "here's why it
+# didn't". See _start_engine() further down for the actual check-launch-wait
+# sequence (Phase 4 of the embedded-inference plan), and
+# claude/embedded-inference-phase4-subprocess-lifecycle.md for the plan it follows.
+signal engine_starting()
+signal engine_ready()
+signal engine_failed(message)
+
 ## Turn engine for Hall meetups (see Scripts/GroupChat.gd). Created as a child
 ## in _ready() so it rides on the same request queue as everything else.
 var group_chat: Node = null
@@ -440,6 +448,20 @@ var _busy: bool = false
 var _current_request: Dictionary = {}
 var _http: HTTPRequest
 
+## True once the engine has answered a health check and is ready for
+## requests. Checked directly (not just via a live signal) by Main.gd when
+## (re)building the suspect-selection screen, since engine_ready may well
+## have already fired before that screen exists - see _start_engine() below.
+var engine_is_ready: bool = false
+## Set right before engine_failed fires, and left in place afterwards, for the
+## same reason as engine_is_ready above.
+var engine_error_message: String = ""
+
+var _engine_http: HTTPRequest # dedicated to startup/health checks only - never shared with the dialogue queue's _http above, so the two can never collide
+var _engine_pid: int = -1 # PID of the llama-server process we launched, -1 until we have. Kept around in case a future change ever wants to shut it down - see the embedded-inference Phase 4 doc's "does the game need to shut it down" note.
+var _engine_poll_timer: Timer
+var _engine_wait_elapsed: float = 0.0
+
 
 func _ready() -> void:
 	# Cheap insurance on the one invariant the case-code format depends on. A
@@ -472,6 +494,8 @@ func _ready() -> void:
 	group_response.connect(group_chat._on_group_response)
 	group_error.connect(group_chat._on_group_error)
 
+	_start_engine()
+
 
 func _setup_input_map() -> void:
 	_add_key_action("move_forward", KEY_W)
@@ -501,6 +525,148 @@ func _add_key_action(action_name: String, keycode: int, ctrl: bool = false) -> v
 		ev.physical_keycode = keycode
 		ev.ctrl_pressed = ctrl
 		InputMap.action_add_event(action_name, ev)
+
+
+# --- llama-server engine lifecycle (Phase 4 of the embedded-inference plan) --
+# Same shape as the earlier Tier A "auto-start Ollama" plan this project
+# scoped first (check first, launch it, wait for it, verify it), aimed at a
+# different executable with different arguments. Lower stakes than that
+# plan's crash-loop history, though: llama-server is a plain executable this
+# game owns outright, launched with an explicit --model path, so there's no
+# tray app that might auto-start a second copy, and no "is the wrong model
+# loaded" question the way Ollama's shared model store raised - llama-server
+# only ever has whichever .gguf we hand it on the command line. See
+# claude/embedded-inference-phase4-subprocess-lifecycle.md.
+
+const LLAMA_SERVER_HEALTH_URL := "http://127.0.0.1:8080/health"
+# How long the very first check (is something already listening?) is allowed
+# to take before concluding nothing is there yet.
+const LLAMA_SERVER_CHECK_TIMEOUT_SEC := 2.0
+# After launching our own copy, how often to check whether it has come up...
+const LLAMA_SERVER_POLL_INTERVAL_SEC := 0.5
+# ...and the total ceiling before giving up and reporting a failure.
+const LLAMA_SERVER_READY_TIMEOUT_SEC := 20.0
+
+
+## Kicks off the check-launch-wait sequence. Called once from _ready(), before
+## the player ever sees the selection screen - GameManager is the project's
+## only autoload, so this runs before Main.tscn and everything else in the
+## scene tree, same reasoning as the Tier A plan.
+func _start_engine() -> void:
+	engine_starting.emit()
+	_engine_http = HTTPRequest.new()
+	_engine_http.use_threads = true
+	add_child(_engine_http)
+
+	_engine_poll_timer = Timer.new()
+	_engine_poll_timer.wait_time = LLAMA_SERVER_POLL_INTERVAL_SEC
+	_engine_poll_timer.one_shot = true
+	add_child(_engine_poll_timer)
+	_engine_poll_timer.timeout.connect(_on_engine_poll_timer_timeout)
+
+	_engine_http.timeout = LLAMA_SERVER_CHECK_TIMEOUT_SEC
+	var err := _engine_http.request(LLAMA_SERVER_HEALTH_URL)
+	if err != OK:
+		_launch_engine()
+		return
+	_engine_http.request_completed.connect(_on_engine_check_completed, CONNECT_ONE_SHOT)
+
+
+func _on_engine_check_completed(result: int, response_code: int, _headers: PackedStringArray, _body: PackedByteArray) -> void:
+	if result == HTTPRequest.RESULT_SUCCESS and response_code == 200:
+		# Something is already up and healthy - a previous copy of the game
+		# that didn't exit cleanly, or llama-server started by hand while
+		# testing. Either way, there's nothing for us to launch.
+		engine_is_ready = true
+		engine_ready.emit()
+		return
+	_launch_engine()
+
+
+## Resolves to the folder Tools/llama-server/ and Models/AI/ both live in
+## today: the project root when run from the editor, or wherever the exported
+## .exe sits once Phase 5 copies both folders alongside it. This same code
+## needs to resolve correctly in either case.
+func _engine_base_dir() -> String:
+	if OS.has_feature("editor"):
+		return ProjectSettings.globalize_path("res://")
+	return OS.get_executable_path().get_base_dir()
+
+
+func _launch_engine() -> void:
+	var exe_path := _engine_base_dir().path_join("Tools/llama-server/llama-server.exe")
+	var model_path := _engine_base_dir().path_join("Models/AI/archibald-basev2.1.gguf")
+
+	if not FileAccess.file_exists(exe_path):
+		_fail_engine("Could not find llama-server.exe at %s. See Tools/llama-server-README.md to download it." % exe_path)
+		return
+	if not FileAccess.file_exists(model_path):
+		_fail_engine("Could not find the model file at %s. See Models/AI/README.md to download it." % model_path)
+		return
+
+	# --ctx-size mirrors LLAMA_SERVER_NUM_CTX above. --n-gpu-layers 999 offloads
+	# every layer to the GPU (more than the model has, which is the documented
+	# way to say "all of them"). --parallel 4 mirrors the old OLLAMA_NUM_PARALLEL
+	# tuning. Deliberately NOT included yet: flash attention and KV-cache
+	# quantization (the old OLLAMA_FLASH_ATTENTION / OLLAMA_KV_CACHE_TYPE) -
+	# guessing the wrong flag spelling here would fail the whole launch rather
+	# than just under-perform, so this is worth adding once someone can confirm
+	# the right syntax for this exact llama-server build against its own --help.
+	var args := PackedStringArray([
+		"--model", model_path,
+		"--host", "127.0.0.1",
+		"--port", "8080",
+		"--ctx-size", str(LLAMA_SERVER_NUM_CTX),
+		"--n-gpu-layers", "999",
+		"--parallel", "4",
+	])
+	# Opening a console (Windows only) piggybacks on the same on/off switch as
+	# the other dev-only conveniences in this file - on while DEBUG_KEYS is on,
+	# so llama-server's own log is visible if something goes wrong; off once
+	# DEBUG_KEYS is turned off for a real export.
+	var pid := OS.create_process(exe_path, args, DEBUG_KEYS)
+	if pid == -1:
+		_fail_engine("Could not start llama-server (the OS refused to launch %s)." % exe_path)
+		return
+
+	_engine_pid = pid
+	_engine_wait_elapsed = 0.0
+	_engine_poll_timer.start()
+
+
+func _on_engine_poll_timer_timeout() -> void:
+	if not OS.is_process_running(_engine_pid):
+		_fail_engine("llama-server exited before it became ready. Check that Tools/llama-server/ and Models/AI/archibald-basev2.1.gguf are both present and not corrupted.")
+		return
+
+	_engine_wait_elapsed += LLAMA_SERVER_POLL_INTERVAL_SEC
+	_engine_http.timeout = LLAMA_SERVER_POLL_INTERVAL_SEC
+	var err := _engine_http.request(LLAMA_SERVER_HEALTH_URL)
+	if err != OK:
+		_retry_or_time_out_engine_wait()
+		return
+	_engine_http.request_completed.connect(_on_engine_poll_completed, CONNECT_ONE_SHOT)
+
+
+func _on_engine_poll_completed(result: int, response_code: int, _headers: PackedStringArray, _body: PackedByteArray) -> void:
+	if result == HTTPRequest.RESULT_SUCCESS and response_code == 200:
+		engine_is_ready = true
+		engine_ready.emit()
+		return
+	_retry_or_time_out_engine_wait()
+
+
+func _retry_or_time_out_engine_wait() -> void:
+	if _engine_wait_elapsed >= LLAMA_SERVER_READY_TIMEOUT_SEC:
+		_fail_engine("llama-server did not respond within %d seconds. It may still be loading a large model, or something else is using port 8080." % int(LLAMA_SERVER_READY_TIMEOUT_SEC))
+		return
+	_engine_poll_timer.start()
+
+
+func _fail_engine(message: String) -> void:
+	engine_error_message = message
+	push_warning("GameManager: %s" % message)
+	engine_failed.emit(message)
 
 
 ## Call this once when a fresh game (or a restart) begins. `character_ids` is
