@@ -19,7 +19,13 @@ extends Node
 #   4. Ending a scene leaves exactly one digest per attendee.
 #   5. Compaction never evicts the system prompt (the schedule block lives at
 #      the end of it, and losing it silently un-fixes the whole CaseGenerator).
-#   6. Request bodies carry keep_alive, stop sequences and the lowered cap.
+#   6. Request bodies carry stop sequences and the lowered token cap at the top
+#      level (llama-server's OpenAI shape, not Ollama's "options"), and sending
+#      one leaves the character's history alone until the reply arrives.
+#   7. The token budgets still fit the window a single conversation actually
+#      gets. --ctx-size is shared across --parallel slots, so this is the check
+#      that would have caught every suspect silently running in 2048 tokens
+#      while the budgets here were written against 8192.
 
 var fails := 0
 
@@ -154,11 +160,60 @@ func _ready() -> void:
 		String(gm._histories["carter"][gm._histories["carter"].size() - 1]["content"]).find("answer 59") != -1)
 
 	print("\n=== 6. request bodies ===")
+	# llama-server speaks the OpenAI chat-completions shape, so generation
+	# settings sit at the top level rather than under Ollama's "options", and
+	# there is no keep_alive - the model stays resident for the life of the
+	# process. See the notes above MAX_RESPONSE_TOKENS in GameManager.
+	var history_before: int = gm._histories["ashford"].size()
 	gm.ask_character("ashford", "Good morning.")
 	var body: Dictionary = gm._current_request["body"]
-	ok("keep_alive is set", String(body.get("keep_alive", "")) == "30m")
-	ok("stop sequences present", Array(body["options"]["stop"]).size() > 0)
-	ok("num_predict lowered to 140", int(body["options"]["num_predict"]) == 140)
+	ok("stop sequences present", Array(body["stop"]).size() > 0)
+	ok("max_tokens lowered to 140", int(body["max_tokens"]) == 140)
+	ok("the question is in the outgoing messages",
+		String((body["messages"] as Array)[-1]["content"]).find("Good morning") != -1)
+
+	# The history must not move until a reply comes back. It used to gain the
+	# player's line here, and nothing removed it when the request failed - so
+	# every failed retry sent a longer history than the one just rejected, and
+	# an interview that hit the context limit once could never recover.
+	ok("history is untouched until the reply lands",
+		gm._histories["ashford"].size() == history_before)
+	ok("the outgoing copy is not the history itself",
+		not (body["messages"] as Array).is_empty() and body["messages"] != gm._histories["ashford"])
+
+	print("\n=== 7. token budgets fit the window the engine actually gives us ===")
+	# --ctx-size is divided across --parallel slots, so a conversation gets
+	# CTX_PER_SLOT, not NUM_CTX. Getting this backwards is what made every
+	# suspect run in a 2048-token window while these budgets assumed 8192.
+	ok("--ctx-size is the per-slot window times the slot count",
+		gm.LLAMA_SERVER_NUM_CTX == gm.LLAMA_SERVER_CTX_PER_SLOT * gm.LLAMA_SERVER_SLOTS)
+	ok("history budget plus request overhead fits one slot",
+		gm.HISTORY_TOKEN_BUDGET + gm.REQUEST_OVERHEAD_TOKENS < gm.LLAMA_SERVER_CTX_PER_SLOT,
+		"%d + %d vs %d" % [gm.HISTORY_TOKEN_BUDGET, gm.REQUEST_OVERHEAD_TOKENS, gm.LLAMA_SERVER_CTX_PER_SLOT])
+	# The failure that started all this: message 0 alone nearly filling the slot,
+	# so an interview died after one or two questions. The murderer's prompt is
+	# the big one - it carries the secret and the lie on top of everything else -
+	# so check every suspect and say which is worst.
+	#
+	# "Room to talk" is the point, not merely fitting: the prompt has to leave
+	# space for a real interview after the per-request overhead is paid. 2000
+	# tokens is roughly a dozen exchanges, which is past where compaction starts
+	# carrying the memory anyway.
+	const MIN_CONVERSATION_TOKENS := 2000
+	var worst := 0
+	var worst_who := ""
+	for who in gm.active_characters():
+		var id := String(who["id"])
+		var sys_tokens: int = gm._approx_tokens([{"content": gm._build_system_prompt(id)}])
+		if sys_tokens > worst:
+			worst = sys_tokens
+			worst_who = id
+		ok("%s's system prompt leaves room to talk%s" % [id, " (murderer)" if id == gm.murderer_id else ""],
+			sys_tokens + gm.REQUEST_OVERHEAD_TOKENS + MIN_CONVERSATION_TOKENS <= gm.LLAMA_SERVER_CTX_PER_SLOT,
+			"~%d tokens + %d overhead + %d to talk exceeds the %d-token slot" % [
+				sys_tokens, gm.REQUEST_OVERHEAD_TOKENS, MIN_CONVERSATION_TOKENS, gm.LLAMA_SERVER_CTX_PER_SLOT])
+	print("  largest system prompt: %s at ~%d tokens, in a %d-token slot" % [
+		worst_who, worst, gm.LLAMA_SERVER_CTX_PER_SLOT])
 
 	print("\n%s  (%d failure(s))" % ["ALL CHECKS PASSED" if fails == 0 else "FAILURES", fails])
 	get_tree().quit(1 if fails > 0 else 0)

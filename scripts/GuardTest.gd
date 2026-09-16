@@ -97,8 +97,10 @@ func _ready() -> void:
 	ok("history untouched", GameManager._histories[who].size() == before)
 	ok("retry jumped the queue",
 		GameManager._request_queue.size() > 0 and bool(GameManager._request_queue[0].get("guard_retry", false)))
+	# Top level, not nested under "options" - llama-server's OpenAI-shaped
+	# endpoint takes generation settings there. See ask_character().
 	ok("retry runs cooler",
-		float(GameManager._request_queue[0]["body"]["options"]["temperature"]) < 0.8)
+		float(GameManager._request_queue[0]["body"]["temperature"]) < 0.8)
 	ok("retry carries a corrective",
 		String((GameManager._request_queue[0]["body"]["messages"] as Array)[-1]["role"]) == "system")
 	GameManager._request_queue.clear()

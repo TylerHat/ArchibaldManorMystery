@@ -74,9 +74,17 @@ const STOP_SEQUENCES := ["\n\n", "Detective:", "\nDetective", "DETECTIVE:"]
 # How much conversation the model is allowed to keep in view. Ollama took this
 # per-request as "options.num_ctx"; llama-server fixes it at process launch
 # instead (the --ctx-size argument, set in Phase 4), so it is no longer sent
-# in any request body below. The constant stays: HISTORY_TOKEN_BUDGET is sized
-# against it, _dump_group_payload() reports it for debugging, and Phase 4
-# reads the number from here rather than keeping a second copy.
+# in any request body below.
+#
+# READ THIS BEFORE CHANGING EITHER NUMBER. --ctx-size is the TOTAL KV context,
+# and llama.cpp divides it evenly across the server slots that --parallel asks
+# for: each conversation gets ctx-size / parallel, not ctx-size. That division
+# is the whole reason these are now two separate constants. They used to be one
+# (--ctx-size 8192 with --parallel 4), which meant every suspect was actually
+# running in a 2048-token window while every budget in this file was sized
+# against 8192 - so a system prompt that is ~2000 tokens on its own filled the
+# window after one or two questions and llama-server started rejecting requests
+# outright (HTTP 400, surfaced to the player as "could not reach the AI engine").
 #
 # We do not rely on the runner's own eviction being survivable either way.
 # HISTORY_TOKEN_BUDGET below keeps every history comfortably inside this
@@ -87,7 +95,27 @@ const STOP_SEQUENCES := ["\n\n", "Detective:", "\nDetective", "DETECTIVE:"]
 # because every attendee's line was written into every other attendee's history.
 # They no longer are - GroupChat renders the room on demand instead - so a
 # meetup now costs about what a private interview costs.
-const LLAMA_SERVER_NUM_CTX := 8192
+
+## Number of server slots. The game only ever has ONE request in flight (see
+## the _busy guard in _process_queue()), so slots buy no throughput at all -
+## only prefix-cache retention, i.e. how many suspects' prompts stay warm
+## between turns. Two keeps the last two speakers warm, which is the pattern a
+## private interview follows; a Hall meetup rotates past that, but the shared
+## preamble means a cold slot still reuses the first ~1400 tokens by LCP and
+## re-reads only the character tail (see _shared_case_preamble()).
+##
+## Each slot costs a full CTX_PER_SLOT of KV cache: ~112 KiB/token for this
+## model (28 layers x 8 KV heads x 128 x 2 x 2 bytes f16), so 2 x 8192 is
+## ~1.75 GiB on top of ~2.1 GiB of weights. That fits a 6 GB card with room
+## to spare. Raising this raises VRAM linearly - check before you do.
+const LLAMA_SERVER_SLOTS := 2
+
+## The window ONE conversation actually gets, and the number every budget below
+## is sized against. Not what goes on the command line - see NUM_CTX.
+const LLAMA_SERVER_CTX_PER_SLOT := 8192
+
+## What --ctx-size receives. Total across all slots.
+const LLAMA_SERVER_NUM_CTX := LLAMA_SERVER_SLOTS * LLAMA_SERVER_CTX_PER_SLOT
 
 # How much of a suspect's private interview gets replayed into their group-scene
 # turn prompt. See private_recap() for why this exists at all.
@@ -108,9 +136,17 @@ const RECAP_MAX_CHARS := 160
 #
 # So we decide what gets forgotten, and we never let it be the system prompt.
 
-## Total budget for one character's history. The rest of LLAMA_SERVER_NUM_CTX is left
-## for the group turn prompt (~700 tokens, which now also carries the rendered
-## scene) and the reply itself.
+## The largest thing that rides along with a history in any single request, so
+## the budget below can be checked against the window rather than assumed to
+## fit. The worst case is a group turn: GroupChat's turn prompt (~700 tokens,
+## rendered scene included) plus the longest reply cap in the file.
+const REQUEST_OVERHEAD_TOKENS := 700 + SUMMARY_MAX_TOKENS
+
+## Total budget for one character's history, INCLUDING the system prompt at
+## index 0 - _approx_tokens() counts every message in the array. The rest of
+## LLAMA_SERVER_CTX_PER_SLOT is left for REQUEST_OVERHEAD_TOKENS above and a
+## safety margin, since _approx_tokens() is an estimate (see CHARS_PER_TOKEN).
+## _ready() asserts the arithmetic still holds.
 const HISTORY_TOKEN_BUDGET := 4500
 
 ## Exchanges kept word-for-word after a compaction. Everything older is folded
@@ -458,7 +494,7 @@ var engine_is_ready: bool = false
 var engine_error_message: String = ""
 
 var _engine_http: HTTPRequest # dedicated to startup/health checks only - never shared with the dialogue queue's _http above, so the two can never collide
-var _engine_pid: int = -1 # PID of the llama-server process we launched, -1 until we have. Kept around in case a future change ever wants to shut it down - see the embedded-inference Phase 4 doc's "does the game need to shut it down" note.
+var _engine_pid: int = -1 # PID of the llama-server process we launched, -1 until we have - and still -1 if _start_engine() adopted a server that was already running, which is what lets _stop_engine() kill only what we own.
 var _engine_poll_timer: Timer
 var _engine_wait_elapsed: float = 0.0
 
@@ -480,9 +516,24 @@ func _ready() -> void:
 			])
 		seen_slots[sl] = String(c["id"])
 
+	# The invariant the engine arguments and every token budget in this file
+	# share. It held silently for a long time while being false at runtime,
+	# because nothing compared the two halves - see LLAMA_SERVER_SLOTS.
+	assert(HISTORY_TOKEN_BUDGET + REQUEST_OVERHEAD_TOKENS < LLAMA_SERVER_CTX_PER_SLOT,
+		"HISTORY_TOKEN_BUDGET + REQUEST_OVERHEAD_TOKENS must fit inside one slot's context window.")
+
 	_setup_input_map()
 	_http = HTTPRequest.new()
 	_http.use_threads = true
+	# Godot's default is 0, meaning wait forever. Without this, a llama-server
+	# that stalls on one request leaves _busy stuck true: request_completed
+	# never fires, the queue never drains, and the dialogue panel sits on
+	# "X is thinking..." with input disabled until the game is restarted.
+	# Generous on purpose - 140 tokens at ~34 tok/s is ~4s and a cold prefix
+	# adds prompt-eval on top, so this is a deadlock breaker, not a latency
+	# budget. A trip here arrives as RESULT_TIMEOUT in _on_request_completed()
+	# and takes the ordinary failure path.
+	_http.timeout = 90.0
 	add_child(_http)
 	_http.request_completed.connect(_on_request_completed)
 
@@ -546,6 +597,11 @@ func _add_key_action(action_name: String, keycode: int, ctrl: bool = false) -> v
 # behavior are untouched by this.
 
 const LLAMA_SERVER_HEALTH_URL := "http://127.0.0.1:8080/health"
+# Reports the settings the server is actually running with, rather than the
+# ones we asked for. Its default_generation_settings.n_ctx is the PER-SLOT
+# window - the number that matters - not the --ctx-size total. Enabled by
+# default in build 10456. See _verify_engine_context().
+const LLAMA_SERVER_PROPS_URL := "http://127.0.0.1:8080/props"
 # How long the very first check (is something already listening?) is allowed
 # to take before concluding nothing is there yet.
 const LLAMA_SERVER_CHECK_TIMEOUT_SEC := 2.0
@@ -605,9 +661,10 @@ func _on_engine_check_completed(result: int, response_code: int, _headers: Packe
 	if result == HTTPRequest.RESULT_SUCCESS and response_code == 200:
 		# Something is already up and healthy - a previous copy of the game
 		# that didn't exit cleanly, or llama-server started by hand while
-		# testing. Either way, there's nothing for us to launch.
-		engine_is_ready = true
-		engine_ready.emit()
+		# testing. Either way, there's nothing for us to launch. But "healthy"
+		# says nothing about what arguments it was given, so check before
+		# adopting it.
+		_verify_engine_context()
 		return
 	_launch_engine()
 
@@ -638,21 +695,35 @@ func _launch_engine() -> void:
 		_fail_engine("Could not find the model file at %s. See Models/AI/README.md to download it." % model_path)
 		return
 
-	# --ctx-size mirrors LLAMA_SERVER_NUM_CTX above. --n-gpu-layers 999 offloads
-	# every layer to the GPU (more than the model has, which is the documented
-	# way to say "all of them"). --parallel 4 mirrors the old OLLAMA_NUM_PARALLEL
-	# tuning. Deliberately NOT included yet: flash attention and KV-cache
-	# quantization (the old OLLAMA_FLASH_ATTENTION / OLLAMA_KV_CACHE_TYPE) -
-	# guessing the wrong flag spelling here would fail the whole launch rather
-	# than just under-perform, so this is worth adding once someone can confirm
-	# the right syntax for this exact llama-server build against its own --help.
+	# --ctx-size is the TOTAL context shared across --parallel slots, so the two
+	# are computed together rather than written out here - see the comment on
+	# LLAMA_SERVER_SLOTS for why getting that relationship wrong is not a
+	# performance problem but a hard failure two questions into an interview.
+	#
+	# --n-gpu-layers 999 offloads every layer to the GPU (more than the model
+	# has, which is the documented way to say "all of them").
+	#
+	# Deliberately NOT included yet: KV-cache quantization (-ctk/-ctv q8_0, with
+	# -fa on). Those flags do exist in this build - confirmed against its own
+	# --help - and would halve the KV cost, buying more slots or a bigger window
+	# for the same VRAM. Left out because it trades measurable quality for
+	# headroom we do not currently need, which is a performance decision worth
+	# making on its own rather than smuggling into a correctness fix.
 	var args := PackedStringArray([
 		"--model", model_path,
 		"--host", "127.0.0.1",
 		"--port", "8080",
 		"--ctx-size", str(LLAMA_SERVER_NUM_CTX),
 		"--n-gpu-layers", "999",
-		"--parallel", "4",
+		"--parallel", str(LLAMA_SERVER_SLOTS),
+		# Pinned off, not left to the default. See the history-compaction note
+		# near HISTORY_TOKEN_BUDGET: the runner evicts oldest-first, which means
+		# the system prompt - and with it the suspect's schedule - is the first
+		# thing to go. An error we can see and handle is strictly better than a
+		# suspect who quietly starts improvising their alibi again. This is
+		# already the default in build 10456; stated so that an engine upgrade
+		# flipping it back cannot silently undo the reasoning above.
+		"--no-context-shift",
 	])
 	# Opening a console (Windows only) piggybacks on the same on/off switch as
 	# the other dev-only conveniences in this file - on while DEBUG_KEYS is on,
@@ -684,10 +755,79 @@ func _on_engine_poll_timer_timeout() -> void:
 
 func _on_engine_poll_completed(result: int, response_code: int, _headers: PackedStringArray, _body: PackedByteArray) -> void:
 	if result == HTTPRequest.RESULT_SUCCESS and response_code == 200:
-		engine_is_ready = true
-		engine_ready.emit()
+		_verify_engine_context()
 		return
 	_retry_or_time_out_engine_wait()
+
+
+## The last gate before the player is allowed to start a game.
+##
+## /health only says a server is listening. It does not say it is running with
+## the arguments this game needs - and the health check in _start_engine()
+## deliberately ADOPTS whatever is already on port 8080, which for a long time
+## meant a llama-server orphaned by a previous run (nothing used to shut one
+## down) was silently inherited along with whatever context window it happened
+## to have been given.
+##
+## That matters because too small a window is not a graceful degradation. Every
+## conversation dies partway through the first interview with an HTTP 400 that
+## reads like a connection problem. This turns that into a refusal to start,
+## with a message naming the real cause.
+func _verify_engine_context() -> void:
+	_engine_http.timeout = LLAMA_SERVER_CHECK_TIMEOUT_SEC
+	var err := _engine_http.request(LLAMA_SERVER_PROPS_URL)
+	if err != OK:
+		# The check itself could not be made. Not grounds to refuse to start -
+		# the server answered /health, so let the player play.
+		_engine_became_ready()
+		return
+	_engine_http.request_completed.connect(_on_engine_props_completed, CONNECT_ONE_SHOT)
+
+
+func _on_engine_props_completed(result: int, response_code: int, _headers: PackedStringArray, body: PackedByteArray) -> void:
+	var slot_ctx := _parse_slot_ctx(result, response_code, body)
+	if slot_ctx <= 0:
+		# Older build, endpoint disabled, or a shape we don't recognize. Same
+		# reasoning as above: don't block the player over a check we couldn't
+		# run. The compaction budget still keeps prompts modest.
+		push_warning("GameManager: could not read the engine's context window from /props - skipping the check.")
+		_engine_became_ready()
+		return
+
+	if slot_ctx < LLAMA_SERVER_CTX_PER_SLOT:
+		if _engine_pid > 0:
+			_fail_engine("The AI engine started with a %d-token context window per conversation, but this game needs %d. Something else may already be using port 8080." % [slot_ctx, LLAMA_SERVER_CTX_PER_SLOT])
+		else:
+			_fail_engine("An AI engine is already running on port 8080, but with only a %d-token context window per conversation - this game needs %d. Close it (or whatever else is using port 8080) and start the game again." % [slot_ctx, LLAMA_SERVER_CTX_PER_SLOT])
+		return
+
+	if OS.is_debug_build():
+		print("[DEBUG] Engine ready: %d tokens of context per conversation." % slot_ctx)
+	_engine_became_ready()
+
+
+## Pulls default_generation_settings.n_ctx out of a /props response, or 0 if
+## the response can't be read. Defensive at every step for the same reason
+## _on_request_completed() is: a malformed body should skip the check, never
+## crash the launch sequence.
+func _parse_slot_ctx(result: int, response_code: int, body: PackedByteArray) -> int:
+	if result != HTTPRequest.RESULT_SUCCESS or response_code != 200:
+		return 0
+	var json := JSON.new()
+	if json.parse(body.get_string_from_utf8()) != OK:
+		return 0
+	var data = json.get_data()
+	if typeof(data) != TYPE_DICTIONARY:
+		return 0
+	var settings = data.get("default_generation_settings", null)
+	if typeof(settings) != TYPE_DICTIONARY:
+		return 0
+	return int(settings.get("n_ctx", 0))
+
+
+func _engine_became_ready() -> void:
+	engine_is_ready = true
+	engine_ready.emit()
 
 
 func _retry_or_time_out_engine_wait() -> void:
@@ -701,6 +841,29 @@ func _fail_engine(message: String) -> void:
 	engine_error_message = message
 	push_warning("GameManager: %s" % message)
 	engine_failed.emit(message)
+
+
+## Shuts down the llama-server we started, so quitting the game doesn't leave
+## 2 GB of weights resident in VRAM and a stranger on port 8080.
+##
+## This is also what keeps _verify_engine_context() from having to fire in
+## practice: the orphan it exists to catch was created by the game not cleaning
+## up after itself.
+func _stop_engine() -> void:
+	# Only ever kill what we launched. _engine_pid is set in _launch_engine()
+	# and nowhere else - in particular it stays -1 when _start_engine() adopts
+	# a server that was already running, which belongs to whoever started it.
+	if _engine_pid > 0 and OS.is_process_running(_engine_pid):
+		OS.kill(_engine_pid)
+	_engine_pid = -1
+
+
+func _notification(what: int) -> void:
+	# WM_CLOSE_REQUEST is the normal route (window closed, or get_tree().quit()
+	# with auto_accept_quit on). PREDELETE covers the autoload being torn down
+	# by anything else, and _stop_engine() is safe to run twice.
+	if what == NOTIFICATION_WM_CLOSE_REQUEST or what == NOTIFICATION_PREDELETE:
+		_stop_engine()
 
 
 ## Call this once when a fresh game (or a restart) begins. `character_ids` is
@@ -1319,9 +1482,15 @@ func _retry_in_character(item: Dictionary) -> void:
 	if not _histories.has(id):
 		return
 	var c := get_character(id)
-	var msgs: Array = []
-	for m in _histories[id]:
-		msgs.append(m)
+
+	# Built from the messages that were actually sent, not from _histories[id].
+	# The player's question is no longer written into the history until a reply
+	# comes back (see ask_character), so rebuilding from the history here would
+	# re-ask the model to answer a question it could no longer see.
+	# item.duplicate(true) below deep-copies the body, so appending to this is
+	# safe and leaves the original item untouched.
+	var retry := item.duplicate(true)
+	var msgs: Array = retry["body"]["messages"]
 	msgs.append({
 		"role": "system",
 		"content": ("That last attempt broke character and has been thrown away. You are %s, a guest "
@@ -1331,8 +1500,6 @@ func _retry_in_character(item: Dictionary) -> void:
 			% String(c.get("short", "yourself")),
 	})
 
-	var retry := item.duplicate(true)
-	retry["body"]["messages"] = msgs
 	retry["body"]["temperature"] = 0.5
 	retry["guard_retry"] = true
 	_request_queue.push_front(retry)
@@ -1447,14 +1614,30 @@ func frame_player_line(raw: String) -> String:
 func ask_character(id: String, question: String) -> void:
 	if not _histories.has(id):
 		return
-	# Before appending, so the request that goes out is already within budget -
+	# Before building the request, so what goes out is already within budget -
 	# compacting after the reply would let exactly one over-budget prompt through
-	# to the engine, and that is the one that gets silently truncated.
+	# to the engine, and that is the one that gets rejected.
 	_compact_history_if_needed(id)
-	_histories[id].append({"role": "user", "content": frame_player_line(question)})
+
+	# The request is built from a COPY, and nothing is written into the real
+	# history until the reply lands (see _on_request_completed). Two reasons,
+	# both of which used to bite:
+	#
+	# 1. This used to append the player's line to _histories[id] here. Nothing
+	#    removed it when the request failed, so every failed retry sent a
+	#    history one message longer than the one that had just been rejected -
+	#    which is why a single context overflow turned into an interview that
+	#    could never recover.
+	# 2. Handing _histories[id] itself to the body stored a live reference. A
+	#    request waiting in the queue would silently pick up whatever
+	#    note_to_character() appended while it waited. ask_group_member() has
+	#    always duplicated for this reason; this now matches it.
+	var framed := frame_player_line(question)
+	var msgs: Array = _histories[id].duplicate()
+	msgs.append({"role": "user", "content": framed})
 	var body := {
 		"model": LLAMA_SERVER_MODEL,
-		"messages": _histories[id],
+		"messages": msgs,
 		"stream": false,
 		# Hard cap on how many tokens the engine is allowed to generate. Without
 		# this, a chatty model can ramble for hundreds of tokens on a one-line
@@ -1465,12 +1648,15 @@ func ask_character(id: String, question: String) -> void:
 		# These were nested under "options" for Ollama's /api/chat. The
 		# OpenAI-style endpoint llama-server speaks instead takes them at the
 		# top level, and has no per-request num_ctx or keep_alive at all - see
-		# LLAMA_SERVER_NUM_CTX and the removed OLLAMA_KEEP_ALIVE above.
+		# LLAMA_SERVER_CTX_PER_SLOT and the removed OLLAMA_KEEP_ALIVE above.
 		"max_tokens": MAX_RESPONSE_TOKENS,
 		"temperature": 0.8,
 		"stop": STOP_SEQUENCES,
 	}
-	_enqueue({"kind": "dialogue", "character_id": id, "question": question, "body": body})
+	# "framed" is what gets committed to the history on success - the question
+	# as the model actually saw it, not the raw text, which is only kept for the
+	# transcript and the case notes.
+	_enqueue({"kind": "dialogue", "character_id": id, "question": question, "framed": framed, "body": body})
 
 
 ## A compact reminder of what this suspect has already told the detective in
@@ -1592,6 +1778,20 @@ func _compact_history_if_needed(id: String) -> void:
 
 	var rebuilt := [system_msg, {"role": "user", "content": summary}]
 	rebuilt.append_array(recent)
+
+	# Keeping HISTORY_KEEP_RECENT messages verbatim is a preference, not a
+	# guarantee: if the system prompt plus those messages is already over
+	# budget, everything above has done nothing and we would hand the engine an
+	# over-budget prompt anyway. So give up the oldest of the kept messages
+	# until it genuinely fits. There is comfortable room at the current window
+	# size and this should never fire - it exists so that "the history is within
+	# budget" is something this function ENFORCES rather than something the
+	# caller hopes for, which is exactly the assumption that failed at the
+	# engine-argument level. Index 0 is never touched, and the last exchange
+	# always survives however tight it gets.
+	while rebuilt.size() > 3 and _approx_tokens(rebuilt) > HISTORY_TOKEN_BUDGET:
+		rebuilt.remove_at(2) # 0 is the system prompt, 1 is the summary
+
 	_histories[id] = rebuilt
 
 	if OS.is_debug_build():
@@ -1669,7 +1869,10 @@ func _dump_group_payload(id: String, messages: Array) -> void:
 		total += String(msg["content"]).length()
 
 	print("\n===== GROUP PROMPT -> %s =====" % String(c.get("name", id)))
-	print("%d messages, %d chars (~%d tokens), num_ctx=%d" % [messages.size(), total, int(total / 4.0), LLAMA_SERVER_NUM_CTX])
+	# Per-slot, not --ctx-size: this prompt occupies one slot, and the total is
+	# shared across LLAMA_SERVER_SLOTS of them. Comparing against the total is
+	# how the window came to be four times smaller than everything assumed.
+	print("%d messages, %d chars (~%d tokens), ctx_per_slot=%d" % [messages.size(), total, int(total / 4.0), LLAMA_SERVER_CTX_PER_SLOT])
 	for i in range(messages.size()):
 		var msg: Dictionary = messages[i]
 		var content := String(msg["content"]).replace("\n", " | ")
@@ -2068,6 +2271,11 @@ func _on_request_completed(result: int, response_code: int, _headers: PackedStri
 				return
 			content = _guard_fallback(character_id)
 
+		# Both halves of the exchange are committed here, together, and only
+		# here. ask_character() deliberately leaves the history untouched until
+		# a reply survives the guard above, so a failed or discarded turn leaves
+		# no trace for the next request to carry.
+		_histories[character_id].append({"role": "user", "content": String(item.get("framed", q))})
 		_histories[character_id].append({"role": "assistant", "content": content})
 		transcript.append({"character_id": character_id, "question": q, "answer": content})
 		_refresh_dialogue_log()
