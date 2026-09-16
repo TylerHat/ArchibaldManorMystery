@@ -32,4 +32,6 @@ project/assembly_name="Archibald Manor- A Clue Mystery"
 
 [rendering]
 
+textures/vram_compression/import_s3tc_bptc=true
+textures/vram_compression/import_etc2_astc=true
 environment/defaults/default_clear_color=Color(0.05, 0.05, 0.08, 1)
