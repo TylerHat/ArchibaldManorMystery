@@ -78,11 +78,24 @@ static func reset_config_cache() -> void:
 
 ## The parsed config, and whether it loaded at all. Every caller shares one
 ## instance; nothing here ever writes to it.
+##
+## A failed load is not fatal - every value below has a fallback - but it is
+## never intentional, and it is quiet enough to ship unnoticed: it once did,
+## putting a cast of black silhouettes walking backwards into a release build.
+## So say so loudly, and name the usual culprit.
 static func _config() -> Array:
 	if not _cfg_cache_valid:
 		_cfg_cache_valid = true
 		_cfg_cache = ConfigFile.new()
 		_cfg_cache_ok = _cfg_cache.load(CONFIG_PATH) == OK
+		if not _cfg_cache_ok:
+			push_error(
+				("SuspectModel: %s did not load - every suspect keeps the model pack's " +
+				"own black materials and faces backwards. In an exported build this " +
+				"means the file was not packed: a plain .cfg is not a resource, so it " +
+				"ships only when include_filter in export_presets.cfg names it.")
+				% CONFIG_PATH
+			)
 	return [_cfg_cache, _cfg_cache_ok]
 
 ## Clip names looked for inside an imported model, best match first. Matching

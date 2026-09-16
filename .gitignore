@@ -2,7 +2,13 @@
 .godot/
 .import/
 export.cfg
-export_presets.cfg
+
+# export_presets.cfg is deliberately NOT ignored. It is not a cache file - Godot
+# never regenerates it, and its include_filter is load-bearing: a plain .cfg is
+# not a resource, so Models/Suspects/suspect_models.cfg only reaches the .pck
+# because that filter names it. With this file ignored, a fresh clone exported a
+# cast of black silhouettes walking backwards and nobody could see why. Its
+# codesign identity and Apple team ID are empty, so there is nothing secret in it.
 
 # Common OS/editor cruft
 .DS_Store
@@ -12,6 +18,15 @@ Thumbs.db
 # Godot exported builds (if you ever export to a folder inside the project)
 /builds/
 /export/
+
+# --- exported builds go to GitHub Releases, never into git -----------------
+# The Godot 4.7 Windows *release* template is 104.39 MiB on its own, so a
+# release build can never be pushed: GitHub hard-rejects any file over 100 MiB.
+# The builds that did fit here were debug exports, which is not what should
+# reach a player. Releases take 2GB per file and cost nothing, so:
+#     gh release create vX.Y.Z executibles/*
+# Keep the folder - the export presets write into it - just never commit it.
+executibles/
 
 # --- generated training material, all local-only -------------------------
 # None of this belongs on GitHub: the harvests and datasets are hundreds of
